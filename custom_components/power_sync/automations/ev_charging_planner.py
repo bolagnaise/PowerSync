@@ -32,6 +32,7 @@ from ..sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from ..registry_compat import iter_device_entries
 from ..ev_load import is_current_ev_power_observation
 from .live_status import known_home_battery_soc
+from .stale_data import missing_data_grace_expired, missing_data_grace_minutes_left
 from ..ev_mode_settings import charging_mode_settings, finite_price_cents
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
@@ -4949,6 +4950,9 @@ class AutoScheduleState:
     wants_charge_source: str = ""
     wants_charge_at: Optional[float] = None
 
+    # Phase 2 grace clocks for data that went missing mid-charge.
+    missing_data: dict = field(default_factory=dict)
+
     def plan_presentation_snapshot(self, now: Optional[datetime] = None) -> dict:
         """Return a read-only, offset-safe summary for schedule consumers.
 
@@ -6713,6 +6717,27 @@ class AutoScheduleExecutor:
         settings.battery_capacity_source = resolved.battery_capacity_source
         return resolved
 
+    def _hold_running_charge_through_gap(self, state, key: str, what: str) -> bool:
+        """Phase 2: keep a running charge through a short data gap.
+
+        Returns True while ``state`` is charging and ``key`` has been missing
+        for less than the grace period; the caller then keeps the session as
+        it is. A clock that is not charging, or has run out, returns False so
+        the caller's normal stop or wait applies.
+        """
+        if not state.is_charging:
+            missing_data_grace_expired(state.missing_data, key, missing=False)
+            return False
+        if missing_data_grace_expired(state.missing_data, key, missing=True):
+            return False
+        minutes = missing_data_grace_minutes_left(state.missing_data, key)
+        reason = f"{what}; continuing for up to {minutes} min while it returns"
+        if not state.last_decision_reason.startswith(f"{what}; continuing"):
+            _LOGGER.info("Auto-schedule: %s", reason)
+        state.last_decision = "charging"
+        state.last_decision_reason = reason
+        return True
+
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -6725,6 +6750,10 @@ class AutoScheduleExecutor:
         shared = shared_data(getattr(self, "hass", None), getattr(self, "config_entry", None))
         if vehicle_id == "generic_ev" and shared is not None:
             state = self.get_state(vehicle_id)
+            if profile_soc(self.hass, shared) is None and self._hold_running_charge_through_gap(
+                state, "ev_soc", "Selected vehicle SOC unavailable",
+            ):
+                return
             if profile_soc(self.hass, shared) is None:
                 state.current_plan = None
                 state.current_window = None
@@ -6787,6 +6816,10 @@ class AutoScheduleExecutor:
 
         # Keep the plan fresh before checking availability.
         ev_soc = await self._get_vehicle_soc(vehicle_id)
+        if ev_soc is None and self._hold_running_charge_through_gap(
+            state, "ev_soc", "EV SOC unavailable",
+        ):
+            return
         if ev_soc is None:
             state.current_plan = None
             state.current_window = None
@@ -6795,6 +6828,7 @@ class AutoScheduleExecutor:
             state.last_decision = "soc_unavailable"
             state.last_decision_reason = "EV SOC sensor unavailable or charger association ambiguous"
             return
+        missing_data_grace_expired(state.missing_data, "ev_soc", missing=False)
         if ev_soc >= settings.target_soc:
             # A previously generated plan is no longer needed. Clear it before
             # any availability gate returns, otherwise the optimiser may keep
@@ -7086,12 +7120,22 @@ class AutoScheduleExecutor:
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
             # Check price constraint (but not for time_critical - deadline takes priority)
-            if not is_smart_schedule_grid_price_allowed(
+            price_allowed = is_smart_schedule_grid_price_allowed(
                 source=source,
                 price_cents=current_price_cents,
                 max_grid_price_cents=effective_max_price,
                 priority=effective_priority,
+            )
+            price_gap = not price_allowed and current_price_cents is None
+            if price_gap and self._hold_running_charge_through_gap(
+                state, "grid_price", "Current grid price unavailable",
             ):
+                # Phase 2: a running grid charge rides out a short price gap.
+                price_allowed = True
+                reason = state.last_decision_reason
+            elif not price_gap:
+                missing_data_grace_expired(state.missing_data, "grid_price", missing=False)
+            if not price_allowed:
                 should_charge = False
                 reason = (
                     "Current grid price unavailable"
@@ -9024,6 +9068,8 @@ class PriceLevelChargingState:
     # sample is not a stop readback unless its poll began after this boundary.
     stop_requested_at: float = 0.0
     zaptec_owned: bool = False
+    # Phase 2 grace clocks for data that went missing mid-charge.
+    missing_data: dict = field(default_factory=dict)
 
 
 def _get_active_dynamic_ev_mode(hass: "HomeAssistant", config_entry: "ConfigEntry", vehicle_id: str) -> Optional[str]:
@@ -10790,6 +10836,28 @@ def _has_current_non_tesla_charge(
     return False
 
 
+_PRICE_LEVEL_NO_PRICE = "No price data available"
+
+
+def _price_level_ride_out_price_gap(state: PriceLevelChargingState, decision):
+    """Phase 2: keep a running Price-Level charge through a short price gap.
+
+    Only the missing-price refusal is softened, only while this vehicle is
+    already charging, and only for the grace period. Starts still wait.
+    """
+    price_gap = not decision.should_charge and decision.reason == _PRICE_LEVEL_NO_PRICE
+    if not price_gap or not state.is_charging:
+        missing_data_grace_expired(state.missing_data, "price", missing=False)
+        return decision
+    if missing_data_grace_expired(state.missing_data, "price", missing=True):
+        return decision
+    minutes = missing_data_grace_minutes_left(state.missing_data, "price")
+    reason = f"{_PRICE_LEVEL_NO_PRICE}; continuing for up to {minutes} min while it returns"
+    if not state.last_decision_reason.startswith(f"{_PRICE_LEVEL_NO_PRICE}; continuing"):
+        _LOGGER.info("Price-level charging: %s", reason)
+    return replace(decision, should_charge=True, reason=reason, mode=state.charging_mode or decision.mode)
+
+
 class PriceLevelChargingExecutor:
     """
     Executes price-level charging based on current price thresholds.
@@ -11746,6 +11814,7 @@ class PriceLevelChargingExecutor:
             recovery_price_cents=settings.get("recovery_price_cents", 30),
             opportunity_price_cents=settings.get("opportunity_price_cents", 10),
         )
+        decision = _price_level_ride_out_price_gap(self._state, decision)
         self._state.last_decision = (
             "wants_charge" if decision.should_charge else "waiting"
         )
@@ -11843,6 +11912,7 @@ class PriceLevelChargingExecutor:
             recovery_price_cents=settings.get("recovery_price_cents", 30),
             opportunity_price_cents=settings.get("opportunity_price_cents", 10),
         )
+        decision = _price_level_ride_out_price_gap(vehicle_state, decision)
         vehicle_state.last_decision = (
             "wants_charge" if decision.should_charge else "waiting"
         )
@@ -12656,6 +12726,8 @@ class ScheduledChargingState:
     is_charging: bool = False
     last_decision: str = "idle"
     last_decision_reason: str = ""
+    # Phase 2 grace clocks for data that went missing mid-charge.
+    missing_data: dict = field(default_factory=dict)
 
 
 class ScheduledChargingExecutor:
@@ -13165,9 +13237,24 @@ class ScheduledChargingExecutor:
                 reason = (
                     f"Scheduled: {start_time}-{end_time}, current retail price unavailable"
                 )
+                if self._state.is_charging and not missing_data_grace_expired(
+                    self._state.missing_data, "retail_price", missing=True,
+                ):
+                    # Phase 2: inside its window, a running scheduled charge
+                    # rides out a short price gap; a start still waits.
+                    minutes = missing_data_grace_minutes_left(
+                        self._state.missing_data, "retail_price",
+                    )
+                    reason = f"{reason}; continuing for up to {minutes} min while it returns"
+                    if not self._state.last_decision_reason.endswith("while it returns"):
+                        _LOGGER.info("%s", reason)
+                    self._state.last_decision = "wants_charge"
+                    self._state.last_decision_reason = reason
+                    return True, reason, "scheduled"
                 self._state.last_decision = "waiting"
                 self._state.last_decision_reason = reason
                 return False, reason, ""
+        missing_data_grace_expired(self._state.missing_data, "retail_price", missing=False)
 
         if current_price_cents <= max_price:
             reason = f"Scheduled: {start_time}-{end_time}, price {current_price_cents:.1f}c <= {max_price}c"

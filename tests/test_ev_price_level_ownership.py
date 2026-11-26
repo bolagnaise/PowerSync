@@ -9327,6 +9327,14 @@ def test_ocpp_smart_schedule_clears_plan_without_soc(monkeypatch, already_chargi
     state.current_plan = SimpleNamespace(windows=[SimpleNamespace()])
     state.is_charging = already_charging
     asyncio.run(executor._evaluate_vehicle("ocpp_beny", settings, {}, 5))
+    if already_charging:
+        # Phase 2: a running charge rides out the gap before the plan is
+        # cleared and the car stopped.
+        assert state.current_plan is not None
+        executor._stop_charging.assert_not_awaited()
+        assert state.last_decision_reason.startswith("EV SOC unavailable; continuing")
+        _expire(state.missing_data, "ev_soc")
+        asyncio.run(executor._evaluate_vehicle("ocpp_beny", settings, {}, 5))
     assert state.current_plan is None
     assert state.last_decision == "soc_unavailable"
     executor._start_charging.assert_not_awaited()
@@ -11680,3 +11688,72 @@ def test_smart_schedule_waits_instead_of_reading_unknown_home_battery_as_empty(m
     assert state.last_decision == "waiting"
     assert state.last_decision_reason == "Waiting for the home battery level (currently unknown)"
     planner.should_charge_now.assert_not_awaited()
+
+
+# Phase 2 grace periods in the planner modes.
+
+
+def _expire(holder, key):
+    from power_sync.automations import stale_data
+    holder["_missing_data_since"][key] -= stale_data.STALE_DATA_GRACE_SECONDS
+
+
+def test_price_level_rides_out_a_missing_price_only_while_charging():
+    from power_sync.optimization.price_level_projection import PriceLevelPolicyDecision
+
+    no_price = PriceLevelPolicyDecision(False, "No price data available")
+    waiting = ev_planner.PriceLevelChargingState()
+    assert ev_planner._price_level_ride_out_price_gap(waiting, no_price) is no_price
+
+    charging = ev_planner.PriceLevelChargingState(is_charging=True, charging_mode="opportunity")
+    held = ev_planner._price_level_ride_out_price_gap(charging, no_price)
+    assert held.should_charge is True and held.mode == "opportunity"
+    assert held.reason == "No price data available; continuing for up to 15 min while it returns"
+
+    _expire(charging.missing_data, "price")
+    assert ev_planner._price_level_ride_out_price_gap(charging, no_price) is no_price
+
+    # A real price refusal is never softened, and it resets the clock.
+    too_dear = PriceLevelPolicyDecision(False, "Price 40c > 30c")
+    assert ev_planner._price_level_ride_out_price_gap(charging, too_dear) is too_dear
+    assert "price" not in charging.missing_data["_missing_data_since"]
+
+
+def test_smart_schedule_hold_helper_only_holds_a_running_charge():
+    hold = ev_planner.AutoScheduleExecutor._hold_running_charge_through_gap
+    idle = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    assert hold(None, idle, "ev_soc", "EV SOC unavailable") is False
+
+    running = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
+    assert hold(None, running, "ev_soc", "EV SOC unavailable") is True
+    assert running.last_decision == "charging"
+    assert running.last_decision_reason == "EV SOC unavailable; continuing for up to 15 min while it returns"
+    _expire(running.missing_data, "ev_soc")
+    assert hold(None, running, "ev_soc", "EV SOC unavailable") is False
+
+
+def test_scheduled_rides_out_a_missing_retail_price_inside_its_window(monkeypatch):
+    executor = ev_planner.ScheduledChargingExecutor.__new__(ev_planner.ScheduledChargingExecutor)
+    executor.hass = _FakeHass()
+    executor.config_entry = _FakeConfigEntry()
+    executor._state = ev_planner.ScheduledChargingState(is_charging=True)
+    monkeypatch.setattr(executor, "_get_settings", lambda: {"enabled": True, "start_time": "00:00",
+                                                            "end_time": "23:59", "max_price_cents": 30},
+                        raising=False)
+    monkeypatch.setattr(executor, "_is_in_time_window", lambda *a: True, raising=False)
+    ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
+    monkeypatch.setattr(ev_pricing, "get_current_retail_price", lambda *a: None)
+
+    should, reason, mode = asyncio.run(_scheduled_price_decision(executor, monkeypatch))
+
+    assert (should, mode) == (True, "scheduled")
+    assert reason.endswith("current retail price unavailable; continuing for up to 15 min while it returns")
+    _expire(executor._state.missing_data, "retail_price")
+    should, _, _ = asyncio.run(_scheduled_price_decision(executor, monkeypatch))
+    assert should is False
+
+
+async def _scheduled_price_decision(executor, monkeypatch):
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    return await executor.get_charging_decision(None)

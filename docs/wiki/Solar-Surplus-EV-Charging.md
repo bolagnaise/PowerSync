@@ -50,6 +50,13 @@ the battery minimum and pause thresholds wait until the level returns. A car
 that has not started yet, or is paused for the battery, waits with the reason
 "Waiting for the home battery level". Smart Schedule follows the same rule.
 
+A short gap in the car's battery level or a price does not end a charge that
+is already running. Solar Surplus, Smart Schedule, Price Level and Scheduled
+keep the current charge for up to 15 minutes and log "continuing for up to
+N min while it returns". If the value is still missing after 15 minutes, they
+stop or pause as before. A car that is not charging yet still waits for the
+value before starting.
+
 ### Powerwall calibration
 
 During a Tesla Powerwall calibration the gateway discharges the battery on its

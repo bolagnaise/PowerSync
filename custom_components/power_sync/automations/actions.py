@@ -47,6 +47,7 @@ from homeassistant.util import dt as dt_util
 
 from ..teslemetry_solar import guard_ev_control
 from .live_status import known_home_battery_soc
+from .stale_data import missing_data_grace_expired, missing_data_grace_minutes_left
 from ..native_rate_admission import (
     SiteImportAdmissionDenied,
     last_ev_submission_refusal,
@@ -15833,6 +15834,28 @@ async def _dynamic_ev_update_surplus(
     )
     if _session_was_replaced("charge-limit check"):
         return
+    soc_unknown = bool(full_soc_reason) and full_soc_reason.startswith(
+        _SOLAR_CEILING_SOC_UNAVAILABLE
+    )
+    if (
+        soc_unknown
+        and state.get("charging_started")
+        and not state.get("paused")
+        and not missing_data_grace_expired(state, "ev_soc", missing=True)
+    ):
+        # Phase 2: an unknown car level cannot show the car crossed its
+        # ceiling. Keep charging through a short gap; stop only if it lasts.
+        minutes = missing_data_grace_minutes_left(state, "ev_soc")
+        reason = (
+            f"{full_soc_reason}; continuing for up to {minutes} min "
+            "while it returns"
+        )
+        if not str(state.get("reason") or "").startswith(full_soc_reason):
+            _LOGGER.info("⚡ Solar surplus EV %s: %s", vehicle_id, reason)
+        state["reason"] = reason
+        full_soc_reason = None
+    elif not soc_unknown:
+        missing_data_grace_expired(state, "ev_soc", missing=False)
     if full_soc_reason:
         from .ev_ownership import get_ev_ownership
 
@@ -16417,11 +16440,32 @@ async def _dynamic_ev_update_surplus(
     deadline_override = bool(
         params.get("solar_export_price_deadline_override", False)
     )
-    if not solar_surplus_price_allows_charging(
+    price_allows_charging = solar_surplus_price_allows_charging(
         export_price_cents,
         params,
         deadline_override=deadline_override,
+    )
+    price_unknown = export_price_cents is None and not price_allows_charging
+    if (
+        price_unknown
+        and current_amps > 0
+        and not state.get("paused")
+        and not missing_data_grace_expired(state, "export_price", missing=True)
     ):
+        # Phase 2: a short gap in the export price must not pause a running
+        # solar charge. Pause only if the price stays missing.
+        minutes = missing_data_grace_minutes_left(state, "export_price")
+        reason = (
+            "Export price unavailable; continuing for up to "
+            f"{minutes} min while it returns"
+        )
+        if not str(state.get("reason") or "").startswith("Export price unavailable; continuing"):
+            _LOGGER.info("⚡ Solar surplus EV %s: %s", vehicle_id, reason)
+        state["reason"] = reason
+        price_allows_charging = True
+    elif not price_unknown:
+        missing_data_grace_expired(state, "export_price", missing=False)
+    if not price_allows_charging:
         limit = get_solar_surplus_max_export_price_cents(params)
         if _no_solar_generation(live_status):
             # With nothing generating (night) the export limit is not what
