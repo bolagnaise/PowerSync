@@ -572,6 +572,75 @@ def _is_powersync_force_tariff(tariff: Any) -> bool:
 
 def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
     """Return the first tariff that is safe to use as a normal restore tariff."""
+
+    def _tou_period_minute_spans(period: dict[str, Any]) -> set[tuple[int, int]] | None:
+        """Return (day, minute-of-day start/end) spans a TOU period covers."""
+        try:
+            from_dow = int(period["fromDayOfWeek"])
+            to_dow = int(period["toDayOfWeek"])
+            start = int(period["fromHour"]) * 60 + int(period["fromMinute"])
+            end = int(period["toHour"]) * 60 + int(period["toMinute"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        days = (
+            range(from_dow, to_dow + 1)
+            if from_dow <= to_dow
+            else [*range(from_dow, 7), *range(0, to_dow + 1)]
+        )
+        windows = [(start, end)] if end > start else [(start, 1440), (0, end)]
+        return {(day, window) for day in days for window in windows if window[1] > window[0]}
+
+
+    def _tou_periods_overlap(first: dict[str, Any], second: dict[str, Any]) -> bool:
+        first_spans = _tou_period_minute_spans(first)
+        second_spans = _tou_period_minute_spans(second)
+        if not first_spans or not second_spans:
+            return False
+        return any(
+            day_a == day_b and win_a[0] < win_b[1] and win_b[0] < win_a[1]
+            for day_a, win_a in first_spans
+            for day_b, win_b in second_spans
+        )
+
+
+    def _repair_widened_sunday_periods(tou_periods: dict[str, Any]) -> None:
+        """Narrow a Sunday-only period that an older restore widened to all week.
+
+        Before v2.12.1844 the restore path filled a missing toDayOfWeek with 6,
+        and that copy was persisted as the saved baseline. A weekend period
+        stored as Sunday 0->0 plus Saturday 6->6 therefore became 0->6 beside
+        the Saturday entry, overlapping weekday periods, and Tesla rejected every
+        restore. Only narrow when the exact weekend signature is present and the
+        Sunday-only result overlaps nothing else in the season.
+        """
+        entries = [
+            (name, period)
+            for name, container in tou_periods.items()
+            if isinstance(container, dict) and isinstance(container.get("periods"), list)
+            for period in container["periods"]
+            if isinstance(period, dict)
+        ]
+        time_fields = ("fromHour", "fromMinute", "toHour", "toMinute")
+        for name, period in entries:
+            if (period.get("fromDayOfWeek"), period.get("toDayOfWeek")) != (0, 6):
+                continue
+            has_saturday_sibling = any(
+                other_name == name
+                and other is not period
+                and (other.get("fromDayOfWeek"), other.get("toDayOfWeek")) == (6, 6)
+                and all(other.get(f) == period.get(f) for f in time_fields)
+                for other_name, other in entries
+            )
+            if not has_saturday_sibling:
+                continue
+            candidate = {**period, "toDayOfWeek": 0}
+            if any(
+                other is not period and _tou_periods_overlap(candidate, other)
+                for _other_name, other in entries
+            ):
+                continue
+            period["toDayOfWeek"] = 0
+
     for tariff in tariffs:
         if isinstance(tariff, dict) and tariff and not _is_powersync_force_tariff(tariff):
             restored = copy.deepcopy(tariff)
@@ -608,8 +677,10 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
                                 if isinstance(period, dict):
                                     for field, default in defaults.items():
                                         period.setdefault(field, default)
+                    _repair_widened_sunday_periods(season["tou_periods"])
             return restored
     return None
+
 
 
 def _extract_tesla_tariff_content(payload: Any) -> dict[str, Any] | None:
