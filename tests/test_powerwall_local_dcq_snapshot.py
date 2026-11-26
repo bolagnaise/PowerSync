@@ -592,6 +592,105 @@ def test_local_battery_calibration_alert_sets_and_stably_clears_guard(active_ale
     assert notifications == [True, False]
 
 
+_LINGERING_REQUEST_ALERTS = [{"name": "SiteMinPowerLimited"}, {"name": "CalibrationRequested"}]
+
+
+def _calibration_coordinator(entry_data):
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    notifications: list[bool] = []
+    coord._schedule_calibration_transition_notification = (
+        lambda *, started: notifications.append(started)
+    )
+    return coord, notifications
+
+
+def _sync(coord, active, alerts=None):
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(active, alerts)))
+
+
+def test_reset_acknowledges_lingering_calibration_requested_until_it_clears():
+    # Ticket 202: CalibrationRequested stayed raised for days before and after
+    # Tesla's calibration while the gateway still followed owner commands.
+    # The reset service must not be undone by the next two-second poll.
+    entry_data: dict = {}
+    coord, notifications = _calibration_coordinator(entry_data)
+
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is True
+    assert notifications == [True]
+
+    transition = calibration_mod.clear_calibration_sources(entry_data)
+    assert transition.completed is True
+    for _ in range(10):
+        _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is False
+    assert entry_data["calibration_sources"] == []
+    assert notifications == [True]
+
+    # An omitted alert payload is not an all-clear and keeps the acknowledgement.
+    coord_snapshot = client_mod._snapshot_from_dcq({"control": {"alerts": None}}, None)
+    asyncio.run(coord._sync_calibration_alert(coord_snapshot))
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is False
+
+    # Once Tesla clears the request, the next request pauses control again.
+    _sync(coord, False)
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is True
+    assert notifications == [True, True]
+
+
+@pytest.mark.parametrize(
+    "battery_alerts",
+    [
+        [{"name": "BatteryCalibration"}],
+        [{"name": "CalibrationRequested"}, {"name": "BatteryCalibration"}],
+    ],
+    ids=["battery_calibration", "both_alerts"],
+)
+def test_reset_never_acknowledges_battery_calibration(battery_alerts):
+    entry_data: dict = {}
+    coord, notifications = _calibration_coordinator(entry_data)
+
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    calibration_mod.clear_calibration_sources(entry_data)
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is False
+
+    # Explicit active calibration re-pauses immediately despite the reset.
+    _sync(coord, True, battery_alerts)
+    assert entry_data["calibration_suspected"] is True
+    assert entry_data["calibration_source"] == "local_alert"
+    assert notifications == [True, True]
+
+    # A reset during BatteryCalibration is re-latched on the next poll.
+    calibration_mod.clear_calibration_sources(entry_data)
+    _sync(coord, True, battery_alerts)
+    assert entry_data["calibration_suspected"] is True
+
+
+def test_reset_without_active_guard_does_not_suppress_next_request():
+    entry_data: dict = {}
+    coord, _ = _calibration_coordinator(entry_data)
+    calibration_mod.clear_calibration_sources(entry_data)
+    _sync(coord, True, _LINGERING_REQUEST_ALERTS)
+    assert entry_data["calibration_suspected"] is True
+
+
+def test_request_only_matcher_distinguishes_battery_calibration():
+    only = calibration_mod.powerwall_calibration_request_only
+    assert only(["CalibrationRequested"])
+    assert only([{"name": "calibration_requested"}, {"name": "EVSEMIA"}])
+    assert not only(["BatteryCalibration"])
+    assert not only(["CalibrationRequested", "BatteryCalibration"])
+    assert not only([])
+    assert not only(None)
+
+
 @pytest.mark.parametrize("clear_polls_before_gap", [0, 1, 2])
 @pytest.mark.parametrize("alert_data", [None, {}, {"active": None}, {"active": "BatteryCalibration"}])
 def test_missing_alert_payload_preserves_calibration_and_requires_fresh_clear_sequence(

@@ -28,9 +28,11 @@ from ..const import (
 from ..tesla_calibration import (
     CALIBRATION_SOURCE_LOCAL_ALERT,
     CALIBRATION_SOURCE_MODE_STICK,
+    CALIBRATION_REQUEST_ACK_KEY,
     calibration_sources,
     dispatch_calibration_state,
     powerwall_calibration_alert_active,
+    powerwall_calibration_request_only,
     set_calibration_source,
 )
 from .client import PowerwallLocalClient, PowerwallSnapshot, PowerwallVersion
@@ -364,6 +366,21 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             return
 
         alert_active = powerwall_calibration_alert_active(snap.alerts)
+        if not alert_active:
+            # A valid poll without any calibration alert ends a reset
+            # acknowledgement; the next CalibrationRequested pauses again.
+            entry_data.pop(CALIBRATION_REQUEST_ACK_KEY, None)
+        elif entry_data.get(CALIBRATION_REQUEST_ACK_KEY):
+            if powerwall_calibration_request_only(snap.alerts):
+                # The owner reset the guard while only CalibrationRequested
+                # was raised.  Some gateways keep that request raised for days
+                # while still following commands, so honour the reset until
+                # the alert clears instead of re-pausing on the next poll.
+                alert_active = False
+            else:
+                # BatteryCalibration is explicit active calibration and is
+                # never acknowledged away.
+                entry_data.pop(CALIBRATION_REQUEST_ACK_KEY, None)
         source_was_active = (
             CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
         )
