@@ -1512,6 +1512,49 @@ async def is_ev_plugged_in(
     return False
 
 
+# Last time each (vehicle, reading) contradiction was logged, so a stuck
+# reading is reported every 30 min instead of every evaluation.
+_CONTRADICTED_READING_LOGGED: dict[tuple[str, str], float] = {}
+
+
+async def _unknown_reading_contradicted(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_vin: Optional[str],
+    is_charging: bool,
+    *,
+    location: Optional[str] = None,
+) -> bool:
+    """Phase 2: whether a charge already running overrules a plug/away reading.
+
+    "Not plugged in" is often an offline bridge or unavailable entity, and an
+    unavailable tracker is not "away". While this mode is charging the car, a
+    car seen actively charging overrules those readings. A definite away
+    location (e.g. not_home) is never overruled, and starts are unaffected.
+    """
+    if not is_charging:
+        return False
+    if location is not None and location != "unavailable":
+        return False
+    try:
+        charging = await is_ev_actively_charging(hass, config_entry, vehicle_vin=vehicle_vin) is True
+    except Exception as err:  # evidence only; never blocks the normal path
+        _LOGGER.debug("Charging probe failed for %s: %s", vehicle_vin, err)
+        return False
+    if charging:
+        what = "location unavailable" if location else "not plugged in"
+        key = (vehicle_vin or "", what)
+        now = time.monotonic()
+        if now - _CONTRADICTED_READING_LOGGED.get(key, -1e9) >= 1800:
+            _CONTRADICTED_READING_LOGGED[key] = now
+            _LOGGER.info(
+                "%s reads as %s but is charging; keeping the running charge",
+                vehicle_vin or "EV",
+                what,
+            )
+    return charging
+
+
 async def is_ev_actively_charging(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -6859,7 +6902,9 @@ class AutoScheduleExecutor:
             )
 
         location = await get_ev_location(self.hass, self.config_entry, vehicle_vin)
-        if location not in ("home", "unknown"):
+        if location not in ("home", "unknown") and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, vehicle_vin, state.is_charging, location=location,
+        ):
             # Vehicle is away - don't try to charge
             if state.is_charging:
                 # Stop any active charging session tracking
@@ -6880,7 +6925,9 @@ class AutoScheduleExecutor:
 
         # Check if vehicle is plugged in
         plugged_in = await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin)
-        if not plugged_in:
+        if not plugged_in and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, vehicle_vin, state.is_charging,
+        ):
             if state.is_charging:
                 state.is_charging = False
             await self._restore_curtailment(state)
@@ -11780,14 +11827,18 @@ class PriceLevelChargingExecutor:
 
         # Check if vehicle is at home
         location = await get_ev_location(self.hass, self.config_entry)
-        if location not in ("home", "unknown"):
+        if location not in ("home", "unknown") and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, None, self._state.is_charging, location=location,
+        ):
             self._state.last_decision = "away"
             self._state.last_decision_reason = f"Vehicle not at home (location: {location})"
             return False, f"Vehicle not at home ({location})", ""
 
         # Check if vehicle is plugged in
         plugged_in = await is_ev_plugged_in(self.hass, self.config_entry)
-        if not plugged_in:
+        if not plugged_in and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, None, self._state.is_charging,
+        ):
             self._state.last_decision = "unplugged"
             self._state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""
@@ -11878,14 +11929,18 @@ class PriceLevelChargingExecutor:
 
         # Check if vehicle is at home
         location = await get_ev_location(self.hass, self.config_entry, vehicle_vin)
-        if location not in ("home", "unknown"):
+        if location not in ("home", "unknown") and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, vehicle_vin, vehicle_state.is_charging, location=location,
+        ):
             vehicle_state.last_decision = "away"
             vehicle_state.last_decision_reason = f"Vehicle not at home (location: {location})"
             return False, f"Vehicle not at home ({location})", ""
 
         # Check if vehicle is plugged in
         plugged_in = await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin)
-        if not plugged_in:
+        if not plugged_in and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, vehicle_vin, vehicle_state.is_charging,
+        ):
             vehicle_state.last_decision = "unplugged"
             vehicle_state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""
@@ -13196,14 +13251,18 @@ class ScheduledChargingExecutor:
 
         # Check if vehicle is at home
         location = await get_ev_location(self.hass, self.config_entry)
-        if location not in ("home", "unknown"):
+        if location not in ("home", "unknown") and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, None, self._state.is_charging, location=location,
+        ):
             self._state.last_decision = "away"
             self._state.last_decision_reason = f"Vehicle not at home (location: {location})"
             return False, f"Vehicle not at home ({location})", ""
 
         # Check if vehicle is plugged in
         plugged_in = await is_ev_plugged_in(self.hass, self.config_entry)
-        if not plugged_in:
+        if not plugged_in and not await _unknown_reading_contradicted(
+            self.hass, self.config_entry, None, self._state.is_charging,
+        ):
             self._state.last_decision = "unplugged"
             self._state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""

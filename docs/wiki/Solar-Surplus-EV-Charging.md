@@ -57,6 +57,11 @@ N min while it returns". If the value is still missing after 15 minutes, they
 stop or pause as before. A car that is not charging yet still waits for the
 value before starting.
 
+A "not plugged in" reading from an offline bridge or unavailable entity, or an
+unavailable location tracker, does not end a charge PowerSync is running while
+the car itself reports charging. A real away location, such as `not_home`,
+still ends it, and these readings still hold a car that has not started.
+
 ### Powerwall calibration
 
 During a Tesla Powerwall calibration the gateway discharges the battery on its

@@ -11757,3 +11757,42 @@ async def _scheduled_price_decision(executor, monkeypatch):
     monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
     monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
     return await executor.get_charging_decision(None)
+
+
+@pytest.mark.parametrize("is_charging, location, probe, expected", [
+    (False, None, True, False),           # starts are never overruled
+    (True, None, True, True),             # unplugged reading, car charging
+    (True, "unavailable", True, True),    # offline tracker, car charging
+    (True, "not_home", True, False),      # a real away is never overruled
+    (True, None, False, False),           # no charging seen: trust the reading
+])
+def test_unknown_plug_or_location_overruled_only_by_a_running_charge(
+    monkeypatch, is_charging, location, probe, expected,
+):
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=probe))
+    result = asyncio.run(ev_planner._unknown_reading_contradicted(
+        _FakeHass(), _FakeConfigEntry(), VIN, is_charging, location=location))
+    assert result is expected
+
+
+def test_every_planner_plug_and_location_gate_uses_the_running_charge_check():
+    """Smart Schedule, Price Level (both paths) and Scheduled all route
+    their unplugged/away gates through _unknown_reading_contradicted."""
+    import ast
+    tree = ast.parse((ROOT / "automations" / "ev_charging_planner.py").read_text())
+    gates = []
+    for cls_name, method in (
+        ("AutoScheduleExecutor", "_evaluate_vehicle"),
+        ("PriceLevelChargingExecutor", "get_charging_decision"),
+        ("PriceLevelChargingExecutor", "get_charging_decision_for_vehicle"),
+        ("ScheduledChargingExecutor", "get_charging_decision"),
+    ):
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls_name)
+        fn = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == method)
+        for node in ast.walk(fn):
+            if isinstance(node, ast.If):
+                test = ast.unparse(node.test)
+                if test.startswith("not plugged_in") or "location not in ('home', 'unknown')" in test:
+                    gates.append((cls_name, method, "_unknown_reading_contradicted" in test))
+    assert len(gates) == 8, gates
+    assert all(wired for *_, wired in gates), gates

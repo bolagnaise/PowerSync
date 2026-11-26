@@ -13244,6 +13244,19 @@ def _dynamic_ev_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional
 _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES = 2
 
 
+async def _ev_seen_charging(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_vin: Optional[str],
+) -> bool:
+    """Whether the car is seen actively charging (contradicts unplugged/unknown-away)."""
+    try:
+        from .ev_charging_planner import is_ev_actively_charging
+
+        return await is_ev_actively_charging(hass, config_entry, vehicle_vin=vehicle_vin) is True
+    except Exception as err:  # evidence only; never blocks the normal path
+        _LOGGER.debug("Dynamic EV: charging probe failed for %s: %s", vehicle_vin, err)
+        return False
+
+
 async def _clear_ble_dynamic_session_if_unplugged(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -13318,6 +13331,23 @@ async def _clear_ble_dynamic_session_if_unplugged(
                 _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES,
             )
             return False
+
+    # Phase 2: "not plugged in" is often an offline bridge or unavailable
+    # entity, not a real unplug. A car seen actively charging is plugged in;
+    # releasing it would leave that charge running with nothing in control.
+    if await _ev_seen_charging(hass, config_entry, vehicle_vin):
+        if _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id) is not state:
+            return False
+        if isinstance(state, dict) and not state.get("plug_reading_contradicted"):
+            state["plug_reading_contradicted"] = True
+            _LOGGER.info(
+                "⚡ Dynamic EV: %s reads as not plugged in but is charging; "
+                "keeping the session until a real unplug",
+                vehicle_id,
+            )
+        return False
+    if isinstance(state, dict):
+        state.pop("plug_reading_contradicted", None)
 
     from .ev_ownership import owner_family
 
@@ -15080,6 +15110,23 @@ async def _release_dynamic_tesla_if_away(
     current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
     if not location or current_state is not state or not current_state.get("active"):
         return False
+    if location == "unavailable":
+        # Phase 2: an offline tracker is not "away". A car seen charging keeps
+        # its session; only a real away reading (e.g. not_home) releases it.
+        vehicle_vin = params.get("vehicle_vin") or (
+            vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
+        )
+        if await _ev_seen_charging(hass, config_entry, vehicle_vin):
+            if not state.get("location_reading_contradicted"):
+                state["location_reading_contradicted"] = True
+                _LOGGER.info(
+                    "%s %s location tracker is unavailable but the car is charging; "
+                    "keeping the session",
+                    log_prefix,
+                    vehicle_id,
+                )
+            return False
+    state.pop("location_reading_contradicted", None)
 
     _LOGGER.info(
         "%s leaving %s outside automation scope while away (%s); "

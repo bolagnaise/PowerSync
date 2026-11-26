@@ -21005,3 +21005,57 @@ def test_waiting_solar_surplus_still_waits_for_a_missing_export_price(monkeypatc
 
     assert state["paused"] is True
     assert "_missing_data_since" not in state or "export_price" not in state["_missing_data_since"]
+
+
+# Phase 2: an unknown plug or location reading is not "unplugged"/"away"
+# while the car is seen actively charging.
+
+
+def _plug_probe_modules(monkeypatch, *, plugged, charging, location="home"):
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    planner.is_ev_plugged_in = AsyncMock(return_value=plugged)
+    planner.is_ev_actively_charging = AsyncMock(return_value=charging)
+    planner.get_ev_location = AsyncMock(return_value=location)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", planner)
+    return planner
+
+
+@pytest.mark.parametrize("charging, released", [(True, False), (False, True)])
+def test_unplugged_reading_keeps_a_session_the_car_is_still_charging(monkeypatch, charging, released):
+    actions._dynamic_ev_state.clear()
+    state = {"active": True, "params": {"vehicle_vin": "ble_car", "charger_type": "tesla"}}
+    actions._dynamic_ev_state["entry-1"] = {"ble_car": state}
+    _plug_probe_modules(monkeypatch, plugged=False, charging=charging)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+
+    result = asyncio.run(actions._clear_ble_dynamic_session_if_unplugged(
+        _Hass([]), _Entry(), "ble_car", state["params"], expected_state=state))
+
+    assert result is released
+    assert stop.await_count == int(released)
+    if released:
+        assert stop.await_args.args[2]["stop_charging"] is False
+    else:
+        assert state["plug_reading_contradicted"] is True
+
+
+@pytest.mark.parametrize("location, charging, released", [
+    ("unavailable", True, False),   # offline tracker, car charging: keep
+    ("unavailable", False, True),   # offline tracker, idle car: release as before
+    ("not_home", True, True),       # a real away is never overruled
+])
+def test_away_release_only_trusts_a_real_away_reading(monkeypatch, location, charging, released):
+    vin = "5YJ3E1EA7NF0000A1"
+    actions._dynamic_ev_state.clear()
+    state = {"active": True, "params": {"vehicle_vin": vin, "charger_type": "tesla"}}
+    actions._dynamic_ev_state["entry-1"] = {vin: state}
+    _plug_probe_modules(monkeypatch, plugged=True, charging=charging, location=location)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+
+    result = asyncio.run(actions._release_dynamic_tesla_if_away(
+        _Hass([]), _Entry(), "entry-1", vin, state))
+
+    assert result is released
+    assert stop.await_count == int(released)
