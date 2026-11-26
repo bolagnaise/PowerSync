@@ -42,9 +42,26 @@ def serial_from_din(din: Any) -> str | None:
     """Return the trailing serial from a Tesla DIN/VIN string."""
     if not din or not isinstance(din, str):
         return None
-    if "--" not in din:
+    split = _split_din(din)
+    if split is None:
         return din
-    return din.rsplit("--", 1)[-1] or None
+    return split[1] or None
+
+
+# Powerwall 3 DINs use "part--serial"; Powerwall 2 units on a mixed PW3 site
+# are reported as "part#serial" (ticket 202).
+_DIN_SEPARATORS = ("--", "#")
+
+
+def _split_din(din: Any) -> tuple[str, str] | None:
+    """Split a Tesla DIN into (part, serial), or None when it has no separator."""
+    if not isinstance(din, str):
+        return None
+    for separator in _DIN_SEPARATORS:
+        if separator in din:
+            part, serial = din.rsplit(separator, 1)
+            return part, serial
+    return None
 
 
 def _block_din(block: dict[str, Any]) -> str | None:
@@ -79,9 +96,10 @@ def _is_non_pw3_powerwall_din(din: Any) -> bool:
     ``batteryBlocks`` but the PW2s never appear as ``PW3BMS`` rows.
     Unparseable DINs are kept on the PW3 side to preserve existing behaviour.
     """
-    if not isinstance(din, str) or "--" not in din:
+    split = _split_din(din)
+    if split is None:
         return False
-    part = din.split("--", 1)[0]
+    part = split[0]
     return bool(part) and not part.startswith("1707000-")
 
 

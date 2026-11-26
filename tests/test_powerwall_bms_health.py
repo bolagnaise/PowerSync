@@ -787,3 +787,74 @@ def test_battery_block_layout_summary_reports_pod_readings():
     assert summary["pod_valid"] == 1
     assert summary["pod"][1] == {"isMIA": True, "POD_nom_full_pack_energy": None,
                                  "POD_nom_energy_remaining": None}
+
+
+def _ticket_202_hash_din_payload():
+    """Reporter's 27 Nov 08:32 v2.12.1859 layout: the gateway reports the two
+    Powerwall 2 DINs as ``part#serial`` and lists ten POD slots (two live)."""
+    data = _ticket_202_payload()
+    data["control"]["systemStatus"]["nominalEnergyRemainingWh"] = 28597
+    data["control"]["batteryBlocks"] = [
+        {"din": _T202_LEADER},
+        {"din": "3012170-05-C#TG122300000TEF"},
+        {"din": "3012170-45-E#TG124247002H2L"},
+    ]
+    data["components"]["msa"] = [
+        _msa("1707000-30-L", "TG126013001MFM"),
+        _msa("3012170-05-C", "TG122300000TEF"),
+        _msa("3012170-45-E", "TG124247002H2L"),
+        _msa("00000000000000000000", "TG126013002D5B", 14.34, 5.10),
+        _msa("00000000000000000000", "TG126116001PNE", 14.42, 6.17),
+        _msa("00000000000000000000", "TG126116001PSN", 14.47, 6.26),
+        _msa("", "", 14.47, 0.2),
+    ]
+    mia = {"POD_EnergyStatus": {"isMIA": True, "POD_nom_full_pack_energy": 0,
+                                "POD_nom_energy_remaining": 0}}
+    data["esCan"] = {"bus": {"POD": [
+        {"POD_EnergyStatus": {"isMIA": False, "POD_nom_full_pack_energy": 14270,
+                              "POD_nom_energy_remaining": 5490}},
+        {"POD_EnergyStatus": {"isMIA": False, "POD_nom_full_pack_energy": 14169,
+                              "POD_nom_energy_remaining": 5577}},
+    ] + [mia] * 8}}
+    return data
+
+
+def test_mixed_site_hash_separated_pw2_dins_show_both_pw2s():
+    """Ticket 202 rev 12: on v2.12.1859 the layout line showed
+    ``block_dins`` like ``3012170-05-C#TG122…`` and ``pw2_dins: []``, so the
+    PW2s were missed and the 1.4% placeholder stayed as "Follower Powerwall"."""
+    result = _run_bms_processing_with_config(
+        _ticket_202_hash_din_payload(), _T202_GATEWAY_CONFIG
+    )
+    packs = result["individual_batteries"]
+
+    assert _labels(packs) == [
+        "Leader Powerwall",
+        "Expansion Pack 1",
+        "Expansion Pack 2",
+        "Follower Powerwall",
+        "Follower Powerwall 2",
+    ]
+    assert all(p["nominalEnergyRemainingWh"] > 5000 for p in packs)
+    followers = packs[3:]
+    assert [p["serialNumber"] for p in followers] == ["TG122300000TEF", "TG124247002H2L"]
+    assert [p["physicalDin"] for p in followers] == [
+        "3012170-05-C#TG122300000TEF",
+        "3012170-45-E#TG124247002H2L",
+    ]
+    assert [p["energySource"] for p in followers] == ["pw2_pod", "pw2_pod"]
+    assert [p["nominalEnergyRemainingWh"] for p in followers] == [5490, 5577]
+
+
+def test_hash_separated_din_helpers():
+    assert bms_health.serial_from_din("3012170-05-C#TG122300000TEF") == "TG122300000TEF"
+    assert bms_health.serial_from_din("1707000-30-L--TG126013001MFM") == "TG126013001MFM"
+    assert bms_health.serial_from_din("TG122300000TEF") == "TG122300000TEF"
+    summary = bms_health.battery_block_layout_summary(
+        None,
+        [{"din": _T202_LEADER}, {"din": "3012170-05-C#TG122300000TEF"},
+         {"din": "1707000-30-L#TG126000000XYZ"}],
+        _T202_LEADER,
+    )
+    assert summary["pw2_dins"] == ["3012170-05-C#TG122300000TEF"]
+    assert summary["pw3_follower_dins"] == ["1707000-30-L#TG126000000XYZ"]
