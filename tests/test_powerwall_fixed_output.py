@@ -203,3 +203,36 @@ async def test_short_fixed_window_is_refused_without_a_power_command():
     with pytest.raises(ValueError, match="expired"):
         await controller.start("discharge", 1800, 1, target_basis="battery_output")
     client.dispatch_battery_power.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+def test_zero_hold_tolerates_negative_gateway_home_load(mode):
+    # Ticket-172: an idle hold commands 0 W whatever the home draws, so a
+    # slightly negative gateway Home Load reading must not end the hold.
+    sample = fixed_snapshot(load=-24.25, solar=0)
+    assert module.battery_watts(mode, 0, sample, fixed_config(),
+                                target_basis="battery_output") == 0
+    with pytest.raises(ValueError, match="coherent.*gateway Home Load: -24.25 W"):
+        module.battery_watts(mode, 1800, sample, fixed_config(),
+                             target_basis="battery_output")
+
+
+@pytest.mark.asyncio
+async def test_zero_hold_renewal_survives_negative_gateway_home_load():
+    client = SimpleNamespace(get_snapshot=AsyncMock(return_value=fixed_snapshot()),
+        dispatch_battery_power=AsyncMock(return_value=True),
+        resume_battery_operation=AsyncMock(return_value=True))
+    controller = module.LocalBatteryDispatch(client, fixed_config, lambda mode: True,
+        AsyncMock(), AsyncMock())
+
+    async def guarded_write(write, _controlled_export, *, requested_export_w):
+        return await write(requested_export_w)
+
+    try:
+        await controller.start("discharge", 0, 600, target_basis="battery_output",
+                               guarded_write=guarded_write)
+        client.get_snapshot.return_value = fixed_snapshot(load=-24.25, solar=0)
+        assert await controller._write() == 0
+        assert client.dispatch_battery_power.await_count == 2
+    finally:
+        await controller.stop()

@@ -174,7 +174,12 @@ def fixed_battery_watts(mode: str, target_w: float, snapshot: Any, config: dict)
     load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
     # Signed PV meters include standby consumption. Preserve that draw in
     # the site-flow calculation rather than rejecting it or clamping it away.
-    if load < 0:
+    if load < 0 and target_w == 0:
+        # A 0 W hold commands no battery power whatever the home draws, so a
+        # negative gateway reading cannot change it. Count it as zero load,
+        # which can only overstate site import in the checks below.
+        load = 0.0
+    elif load < 0:
         raise ValueError(
             f"Fixed battery output requires coherent load and solar (gateway Home Load: {load:g} W)"
         )

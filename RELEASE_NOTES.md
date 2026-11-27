@@ -1,8 +1,7 @@
-<!-- release: v2.12.1861 -->
-## Every Powerwall now gets its own dashboard card
+<!-- release: v2.12.1863 -->
 
-If PowerSync found an extra Powerwall or expansion pack after your first setup, its charge, health and capacity sensors existed but the dashboard's Powerwalls section didn't show them. This happened, for example, with the second Powerwall 2 on a Powerwall 3 site after v2.12.1860. The section now shows a card for every pack. Update through HACS and restart Home Assistant. If you use the generated PowerSync dashboard, reload the dashboard page.
+## Powerwall 0 W battery hold keeps running
 
-## EV charging rides out short data gaps
+A locally paired Powerwall holding the battery at 0 W could stop partway through when the gateway briefly reported a slightly negative Home Load. The battery then went back to its normal operation. A 0 W hold doesn't depend on home load, so it now continues through these readings. Fixed charge and discharge power still stop on a negative Home Load reading, as before.
 
-A running EV charge no longer stops because one reading briefly goes missing. This covers the price, the car's charge level, the plug state and the car's location. PowerSync allows 15 minutes for a missing price or car charge level to come back. An unknown home battery level is no longer treated as 0%. Missing or stale data still prevents PowerSync from starting a new charge.
+Update through HACS and restart Home Assistant.
