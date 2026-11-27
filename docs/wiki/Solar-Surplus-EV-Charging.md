@@ -136,6 +136,8 @@ an away report blocks the request.
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
 
+If a Tesla stops charging during a Scheduled window and then goes quiet (for example, it falls asleep), Scheduled no longer holds the session until the window ends. Fifteen minutes after its last Start, if the car's last report is Stopped and no reading shows it drawing power, Scheduled releases the session without sending Stop. On the next cycle it checks the window and price again and can start the car. It retries at most once every 15 minutes.
+
 ### Price Level charging on a shared Sigenergy AC charger
 
 After PowerSync confirms the first EV was unplugged and ends its charging session, it evaluates the next EV connected to that charger against the current Price Level settings. You can leave Price Level enabled between cars.

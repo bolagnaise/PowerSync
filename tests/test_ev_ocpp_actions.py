@@ -21488,3 +21488,71 @@ def test_unknown_home_battery_level_keeps_retrying_an_unconfirmed_floor_stop(mon
 
     assert set_amps_calls and set_amps_calls[-1] == 0
     assert state["paused"] is True
+
+
+# --- Scheduled: a car that stops mid-window and goes quiet is not held --------
+
+@pytest.mark.parametrize(("charging", "amps", "started_minutes_ago", "release"), [
+    ("Stopped", 0, 20, True),    # quiet stop after the 15-minute period
+    ("Stopped", 0, 10, False),   # still inside the quiet period
+    ("Charging", 0, 20, False),  # last known state is charging
+    ("Stopped", 8, 20, False),   # a reading shows draw
+])
+def test_scheduled_tesla_releases_after_a_quiet_stop(monkeypatch, charging, amps, started_minutes_ago, release):
+    from power_sync.automations.ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    vehicle = "5YJTEST00000000R4"
+    now = datetime.now(timezone.utc)
+    status_entity = "sensor.test_vehicle_charging"
+    current_entity = "sensor.test_vehicle_charger_current"
+    stale = now - timedelta(minutes=30)  # the car went to sleep
+    hass = _Hass([
+        _State(status_entity, charging, last_reported=stale),
+        _State(current_entity, str(amps), {"unit_of_measurement": "A"}, last_reported=stale),
+    ])
+    _install_native_ha_writer(hass, vehicle, status_entity, current_entity)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    physical_stop = AsyncMock()
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    entry = _Entry()
+    lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="scheduled")
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle: {
+        "active": True,
+        "current_amps": 32,
+        "last_start_command_at": datetime.now() - timedelta(minutes=started_minutes_ago),
+        "cancel_timer": Mock(),
+        "params": {"owner_mode": "scheduled", "charger_type": "tesla"},
+    }}
+
+    assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is release
+    assert get_ev_ownership(hass, entry, vehicle)[1] is (None if release else lease)
+    physical_stop.assert_not_awaited()  # releasing control never sends Stop
+
+
+@pytest.mark.parametrize(("state", "power", "release"), [
+    ("Stopped", "0", True), ("Charging", "0", False), ("Stopped", "6.5", False),
+])
+def test_scheduled_ble_only_releases_after_a_quiet_stop(monkeypatch, state, power, release):
+    from power_sync.automations.ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=30)
+    hass = _Hass([
+        _State("sensor.car_charging_state", state, last_reported=stale),
+        _State("sensor.car_charge_power", power, {"unit_of_measurement": "kW"}, last_reported=stale),
+    ])
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", AsyncMock())
+    entry = _Entry()
+    entry.options = {"ev_provider": actions.EV_PROVIDER_TESLA_BLE, "tesla_ble_entity_prefix": "car"}
+    vehicle = "ble_car"
+    lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="scheduled")
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle: {
+        "active": True,
+        "current_amps": 32,
+        "last_start_command_at": datetime.now() - timedelta(minutes=20),
+        "params": {"owner_mode": "scheduled", "charger_type": "tesla"},
+    }}
+
+    assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is release
+    assert get_ev_ownership(hass, entry, vehicle)[1] is (None if release else lease)

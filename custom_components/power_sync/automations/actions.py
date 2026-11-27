@@ -1717,6 +1717,43 @@ def _has_fresh_scheduled_ble_stop(
     return amps is not None
 
 
+# How long a Scheduled Tesla may sit silently stopped before its stale control
+# is released so Scheduled can start it again.
+SCHEDULED_QUIET_STOP_RELEASE_SECONDS = 15 * 60
+
+
+def _reading_shows_draw(reading: Any) -> bool:
+    try:
+        return reading is not None and float(reading.state) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _scheduled_tesla_last_known_stopped(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_id: str, native_status: str | None,
+    native_readings: tuple = (),
+) -> bool:
+    """Whether the car last reported Stopped and no reading of any age shows draw."""
+    if native_status is not None:
+        return native_status == "stopped" and not any(map(_reading_shows_draw, native_readings))
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state,
+    )
+
+    config = {**config_entry.data, **config_entry.options}
+    prefix = vehicle_id[4:]
+    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE or prefix not in resolve_ble_prefixes(hass, config):
+        return False
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    if str(getattr(charging, "state", "")).strip().lower() != "stopped":
+        return False
+    return not any(map(_reading_shows_draw, (
+        get_tesla_ble_charge_power_state(hass, prefix),
+        get_tesla_ble_charge_current_state(hass, prefix),
+    )))
+
+
 async def _release_stopped_scheduled_tesla(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1741,6 +1778,8 @@ async def _release_stopped_scheduled_tesla(
 
     started_at = state.get("last_start_command_at")
     native_confirmed = False
+    native_status = None
+    native_readings: tuple = ()
     if not vehicle_id.startswith("ble_"):
         entity_id = await _get_tesla_ev_entity(
             hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
@@ -1764,6 +1803,7 @@ async def _release_stopped_scheduled_tesla(
         )
         power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
         current = hass.states.get(current_entity) if current_entity else None
+        native_readings = (current,)
         amps, _error, _age = _phase_current_state_amps(current)
         if (
             (entity_id is not None and hass.states.get(entity_id) is not charging)
@@ -1777,16 +1817,41 @@ async def _release_stopped_scheduled_tesla(
             and (amps is not None or power_available)
         )
 
+    # A car that stops mid-window and then sleeps never sends the fresh report
+    # above, which held Scheduled ("control active") until the window ended.
+    # After a quiet period its last known Stopped, with no current reading of
+    # any age (and, for BLE, no power reading of any age) showing draw, lets
+    # Scheduled re-check and start again. Releasing never sends a Stop. Each new Start
+    # resets the clock, so retries stay at most one per quiet period.
+    quiet_stop = (
+        isinstance(started_at, datetime)
+        and (
+            datetime.now(started_at.tzinfo) if started_at.tzinfo else datetime.now()
+        ) - started_at >= timedelta(seconds=SCHEDULED_QUIET_STOP_RELEASE_SECONDS)
+        and _scheduled_tesla_last_known_stopped(
+            hass, config_entry, vehicle_id,
+            native_status if not vehicle_id.startswith("ble_") else None,
+            native_readings,
+        )
+    )
+
     # A concurrent Start can transfer the dynamic controller in place.
     if _start_dynamic_lock.locked():
         return False
     async with _start_dynamic_lock:
-        if not native_confirmed and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at):
+        if (
+            not native_confirmed
+            and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at)
+            and not quiet_stop
+        ):
             return False
         await _action_stop_ev_charging_dynamic(hass, config_entry, {
             "vehicle_id": vehicle_id,
             "stop_charging": False,
-            "stop_reason": "Scheduled Tesla reports stopped and zero draw",
+            "stop_reason": (
+                "Scheduled Tesla reports stopped and zero draw" if not quiet_stop
+                or native_confirmed else "Scheduled Tesla stayed stopped and quiet"
+            ),
             "_expected_state": state,
             "_expected_lease": lease,
         })
