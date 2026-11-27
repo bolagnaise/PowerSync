@@ -41,30 +41,6 @@ def _optional_kw_to_w(value: Any) -> float | None:
         return None
 
 
-def _valid_battery_level(value: Any) -> bool:
-    if value is None or isinstance(value, bool):
-        return False
-    try:
-        level = float(value)
-    except (TypeError, ValueError):
-        return False
-    return math.isfinite(level) and 0 <= level <= 100
-
-
-def ev_home_battery_soc(live_status: Mapping[str, Any] | None) -> float | None:
-    """Return the home battery level for EV floors, or None when it is unknown.
-
-    Live statuses built before ``battery_soc_known`` existed (or from the Tesla
-    live-status API) carry only ``battery_soc``; a usable number there counts.
-    """
-    if not live_status:
-        return None
-    if live_status.get("battery_soc_known") is False:
-        return None
-    value = live_status.get("battery_soc")
-    return float(value) if _valid_battery_level(value) else None
-
-
 def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
     """Convert coordinator data into the EV automation live_status shape.
 
@@ -79,10 +55,8 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
     )
     native_zero_export = _native_zero_export(data)
     return {
-        "battery_soc": data.get("battery_level", 0),
-        # ``battery_soc`` keeps its legacy 0 default for curtailment. EV battery
-        # floors must not read a missing level as 0%: see home_battery_floor.
-        "battery_soc_known": _valid_battery_level(data.get("battery_level")),
+        # None when unknown: a missing level is not an empty battery.
+        "battery_soc": data.get("battery_level"),
         "grid_power": _kw_to_w(data.get("grid_power", 0)),
         "solar_power": (
             None if data.get("solar_power_valid") is False
@@ -246,3 +220,18 @@ def site_live_status(
             live_status["ac_production_curtailed"] = True
         return live_status, True
     return None, configured
+
+
+def known_home_battery_soc(live_status: Any) -> float | None:
+    """Return the home battery level, or None when it is missing or invalid.
+
+    A missing level must not read as 0%: that paused or stopped EV charging
+    as if the home battery were empty.
+    """
+    value = live_status.get("battery_soc") if isinstance(live_status, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= 100:
+        return None
+    return value

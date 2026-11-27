@@ -11595,11 +11595,28 @@ function _powerwallHealth(hass, findEntity, registryRows) {
   // The deferred-add pattern means these only exist on PW2 / supported sites,
   // so we render the section only when at least one block is discovered.
   const states = hass && hass.states ? hass.states : {};
-  const blockIndices = new Set();
+  // Older installs keep sensor.power_sync_pwN_<metric>. Packs first added after
+  // the object-id rename get a different entity_id, so also map pack sensors
+  // by their registry unique_id (<entry_id>_pwN_<metric>).
+  const packEntities = new Map();
+  const addPackEntity = (index, suffix, entityId) => {
+    if (!packEntities.has(index)) packEntities.set(index, {});
+    const metrics = packEntities.get(index);
+    if (!metrics[suffix]) metrics[suffix] = entityId;
+  };
   const blockRe = /^sensor\.power_sync_pw(\d+)_(soc|soh|capacity|voltage|temperature)$/;
   for (const key of Object.keys(states)) {
     const m = blockRe.exec(key);
-    if (m) blockIndices.add(parseInt(m[1], 10));
+    if (m) addPackEntity(parseInt(m[1], 10), m[2], key);
+  }
+  const packUniqueRe = /_pw(\d+)_(soc|soh|capacity|voltage|temperature)$/;
+  for (const row of registryRows || []) {
+    if (row?.platform !== 'power_sync' || !row.entity_id?.startsWith('sensor.')) continue;
+    if (!states[row.entity_id]) continue;
+    const m = packUniqueRe.exec(row.unique_id || '');
+    if (m && row.unique_id === `${row.config_entry_id}_pw${m[1]}_${m[2]}`) {
+      addPackEntity(parseInt(m[1], 10), m[2], row.entity_id);
+    }
   }
   const cards = [];
   const pairedEntity = findEntity('binary_sensor', 'powerwall_local_paired');
@@ -11638,8 +11655,9 @@ function _powerwallHealth(hass, findEntity, registryRows) {
   if (telemetryRows.length) {
     cards.push({ type: 'entities', title: 'Powerwall Telemetry', show_header_toggle: false, entities: telemetryRows });
   }
-  const sortedIndices = Array.from(blockIndices).sort((a, b) => a - b);
+  const sortedIndices = Array.from(packEntities.keys()).sort((a, b) => a - b);
   for (const i of sortedIndices) {
+    const packMetrics = packEntities.get(i);
     const entities = [];
     let title = `Powerwall ${i}`;
     for (const [suffix, label, icon] of [
@@ -11649,8 +11667,8 @@ function _powerwallHealth(hass, findEntity, registryRows) {
       ['voltage', 'Voltage', 'mdi:flash'],
       ['temperature', 'Temperature', 'mdi:thermometer'],
     ]) {
-      const id = `sensor.power_sync_pw${i}_${suffix}`;
-      if (states[id] && states[id].state !== 'unavailable') {
+      const id = packMetrics[suffix];
+      if (id && states[id] && states[id].state !== 'unavailable') {
         title = states[id].attributes?.pack_label || title;
         entities.push({ entity: id, name: label, icon });
       }

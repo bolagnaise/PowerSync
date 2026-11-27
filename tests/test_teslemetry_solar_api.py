@@ -120,6 +120,19 @@ async def test_get_returns_uncertain_hold_without_any_vehicle_or_service_request
 
 
 @pytest.mark.asyncio
+async def test_get_cached_settings_exclude_internal_hold_aliases(view):
+    api, gate, _, calls = view
+    await gate.load()
+    await gate.hold(VIN, {'enabled': True, 'lowerChargeLimit': 20, 'upperChargeLimit': 80,
+                          'aliases': ['BLE_TESLA_FLINN']})
+    status, result = await api.get(request())
+    assert status == 200 and calls == []
+    assert result['entries'][0]['status'] == 'cached'
+    assert result['entries'][0]['cached_settings'] == {
+        'enabled': True, 'lowerChargeLimit': 20, 'upperChargeLimit': 80}
+
+
+@pytest.mark.asyncio
 async def test_powersync_fleet_metadata_never_contacts_cloud_or_tesla(view):
     api, _, entry, calls = view
     entry.data.update(tesla_ev_api_provider='none', tesla_api_provider='powersync', teslemetry_api_token='psync-secret')

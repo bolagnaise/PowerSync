@@ -31,7 +31,7 @@ namespace esphome
       ESP_LOGCONFIG(TAG, "Tesla BLE Vehicle:");
       LOG_BINARY_SENSOR("  ", "Asleep Sensor", binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]);
     }
-    TeslaBLEVehicle::TeslaBLEVehicle() : tesla_ble_client_(new TeslaBLE::Client{})
+    TeslaBLEVehicle::TeslaBLEVehicle() : tesla_ble_client_(new PowerSyncBLEClient{})
     {
       ESP_LOGCONFIG(TAG, "Constructing Tesla BLE Vehicle component");
     }
@@ -51,6 +51,8 @@ namespace esphome
       this->initializePrivateKey();
       this->loadSessionInfo();
       if (recovery_proof_ != nullptr) setup_stop_recovery();
+      publish_charge_on_solar();
+      publish_cos_pairing();
     }
 
     void TeslaBLEVehicle::initializeFlash()
@@ -107,6 +109,15 @@ namespace esphome
 
       BLECommand current_command = command_queue_.front();
       uint32_t now = millis();
+      // Hold a not-yet-started VCSEC command while a key add awaits its
+      // key-card tap (see cos_pairing.cpp). Keep it fresh so the wait does
+      // not count against its own timeout.
+      if (key_add_pending(now) && current_command.state == BLECommandState::IDLE
+          && current_command.domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
+      {
+        command_queue_.front().started_at = now;
+        return;
+      }
       // Overall timeout check
       if ((now - current_command.started_at) > COMMAND_TIMEOUT)
       {
@@ -780,12 +791,14 @@ namespace esphome
           case VCSEC_FromVCSECMessage_whitelistEntryInfo_tag:
           {
             ESP_LOGD(TAG, "Received whitelist entry info");
+            handle_cos_pairing_entry(vcsec_message.sub_message.whitelistEntryInfo);
             break;
           }
           case VCSEC_FromVCSECMessage_nominalError_tag:
           {
             ESP_LOGE(TAG, "Received nominal error");
             ESP_LOGE(TAG, "  error: %s", generic_error_to_string(vcsec_message.sub_message.nominalError.genericError));
+            handle_cos_pairing_entry_error(int(vcsec_message.sub_message.nominalError.genericError));
             break;
           }
           default:
@@ -823,6 +836,10 @@ namespace esphome
             ESP_LOGW (TAG, "Parsed CarServer.Response but fault code was %s", message_fault_to_string(fault));
           }
             //log_routable_message(TAG, &message);
+          // A correlated Charge on Solar reply is consumed here; the generic
+          // handler would otherwise retry it or treat it as a polled read.
+          if (handle_charge_on_solar_response(static_carserver_response_)) return;
+          if (handle_cos_pairing_response(static_carserver_response_)) return;
           log_carserver_response(TAG, &static_carserver_response_);
           if (static_carserver_response_.has_actionStatus && !command_queue_.empty())
           {
@@ -919,6 +936,8 @@ namespace esphome
 
     void TeslaBLEVehicle::loop()
     {
+      tick_charge_on_solar();
+      tick_cos_pairing();
       if (recovery_proof_ && stop_recovery_.locked()) {
         if (!stop_recovery_.reading()) return;
         if (uint32_t(millis() - recovery_read_started_) >= 300000U) {
@@ -1171,6 +1190,7 @@ namespace esphome
 
       auto session = tesla_ble_client_->getPeer(domain);
       session->updateSession(session_info);
+      remember_vehicle_key(domain, *session_info);
 
       return 0;
     }
@@ -1704,6 +1724,7 @@ namespace esphome
         ESP_LOGE(TAG, "Failed to update session info");
         return return_code;
       }
+      remember_vehicle_key(domain, session_info);
       // save session info to NVS
       return_code = nvs_save_session_info(session_info, domain);
       if (return_code != 0)

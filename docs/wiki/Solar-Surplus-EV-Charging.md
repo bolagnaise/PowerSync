@@ -44,10 +44,23 @@ can request a stop if the Tesla starts charging on plug-in. This requires
 PowerSync control of that vehicle and fresh, matching charging state and power.
 The hands-off external charging setting continues to leave those sessions alone.
 
-If the home battery level is unavailable, Solar Surplus does not start a new
-session while its home battery minimum is above 0%. A session that is already
-charging keeps charging. Only a real reading below the pause point pauses it,
-so a brief telemetry gap no longer stops the car.
+If the home battery level is unavailable, PowerSync does not treat it as an
+empty battery. A car that is already charging keeps following the surplus, and
+the battery minimum and pause thresholds wait until the level returns. A car
+that has not started yet, or is paused for the battery, waits with the reason
+"Waiting for the home battery level". Smart Schedule follows the same rule.
+
+A short gap in the car's battery level or a price does not end a charge that
+is already running. Solar Surplus, Smart Schedule, Price Level and Scheduled
+keep the current charge for up to 15 minutes and log "continuing for up to
+N min while it returns". If the value is still missing after 15 minutes, they
+stop or pause as before. A car that is not charging yet still waits for the
+value before starting.
+
+A "not plugged in" reading from an offline bridge or unavailable entity, or an
+unavailable location tracker, does not end a charge PowerSync is running while
+the car itself reports charging. A real away location, such as `not_home`,
+still ends it, and these readings still hold a car that has not started.
 
 When Solar Surplus ends a session for a Tesla it never started (for example,
 when you turn it off, the charge limit is reached, or Smart Schedule or Boost

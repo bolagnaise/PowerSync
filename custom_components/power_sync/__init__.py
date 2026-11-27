@@ -9998,6 +9998,7 @@ class BatteryHealthView(HomeAssistantView):
         )
         from .powerwall_local.bms_health import (
             assign_pack_roles_from_battery_blocks,
+            battery_block_layout_summary,
             build_mixed_site_pw2_packs,
             has_pw3_stack,
             is_placeholder_expansion_pack,
@@ -10252,6 +10253,12 @@ class BatteryHealthView(HomeAssistantView):
         # Mixed sites: Powerwall 2 units listed in batteryBlocks never appear as
         # PW3BMS rows, so they must not absorb PW3 follower slots (ticket 202).
         pw2_dins = mixed_site_pw2_dins(battery_blocks, din) if is_pw3_stack else []
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "fleet_api_bms: battery block layout pw3_stack=%s %s",
+                is_pw3_stack,
+                battery_block_layout_summary(data, battery_blocks, din),
+            )
         if is_pw3_stack and follower_indices and current_wh and not pw2_dins:
             leader_full_wh = sum(
                 p["nominalFullPackEnergyWh"] for p in individual if not p.get("isFollower")
@@ -48320,10 +48327,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .teslemetry_solar import register_services as _register_native_solar_services
     _register_native_solar_services(hass)
+    from .charge_on_solar_pairing import register_services as _register_cos_pairing_services
+    _register_cos_pairing_services(hass)
     from .ev_charging_services import register_services as _register_ev_charging_services
     _register_ev_charging_services(hass)
     from .teslemetry_solar_api import register_http_view as _register_native_solar_http
     _register_native_solar_http(hass)
+    from .charge_on_solar_pairing import register_http_view as _register_cos_pairing_http
+    _register_cos_pairing_http(hass)
     from .tesla_schedule_planning import register_http_view as _register_tesla_schedule_planning_http
     _register_tesla_schedule_planning_http(hass)
     _LOGGER.info(

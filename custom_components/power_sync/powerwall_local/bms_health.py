@@ -42,9 +42,26 @@ def serial_from_din(din: Any) -> str | None:
     """Return the trailing serial from a Tesla DIN/VIN string."""
     if not din or not isinstance(din, str):
         return None
-    if "--" not in din:
+    split = _split_din(din)
+    if split is None:
         return din
-    return din.rsplit("--", 1)[-1] or None
+    return split[1] or None
+
+
+# Powerwall 3 DINs use "part--serial"; Powerwall 2 units on a mixed PW3 site
+# are reported as "part#serial" (ticket 202).
+_DIN_SEPARATORS = ("--", "#")
+
+
+def _split_din(din: Any) -> tuple[str, str] | None:
+    """Split a Tesla DIN into (part, serial), or None when it has no separator."""
+    if not isinstance(din, str):
+        return None
+    for separator in _DIN_SEPARATORS:
+        if separator in din:
+            part, serial = din.rsplit(separator, 1)
+            return part, serial
+    return None
 
 
 def _block_din(block: dict[str, Any]) -> str | None:
@@ -79,9 +96,10 @@ def _is_non_pw3_powerwall_din(din: Any) -> bool:
     ``batteryBlocks`` but the PW2s never appear as ``PW3BMS`` rows.
     Unparseable DINs are kept on the PW3 side to preserve existing behaviour.
     """
-    if not isinstance(din, str) or "--" not in din:
+    split = _split_din(din)
+    if split is None:
         return False
-    part = din.split("--", 1)[0]
+    part = split[0]
     return bool(part) and not part.startswith("1707000-")
 
 
@@ -171,6 +189,45 @@ def _pw2_pod_readings(data: dict[str, Any] | None) -> list[dict[str, Any]]:
             serial = raw_serial if isinstance(raw_serial, str) and raw_serial else None
         readings.append({"full": full, "remaining": min(remaining, full), "serial": serial})
     return readings
+
+
+def battery_block_layout_summary(
+    data: dict[str, Any] | None,
+    battery_blocks: list[dict[str, Any]],
+    leader_din: Any = None,
+) -> dict[str, Any]:
+    """Debug summary of how batteryBlocks DINs are classified (ticket 202).
+
+    Records the raw DINs, which are treated as PW3 followers or Powerwall 2
+    units, and the raw POD energy readings, so a debug log shows why a mixed
+    site did or did not get per-Powerwall 2 packs.
+    """
+    raw_dins = [
+        block.get("din") or block.get("vin") if isinstance(block, dict) else None
+        for block in battery_blocks or []
+    ]
+    es_can = (data or {}).get("esCan") if isinstance(data, dict) else None
+    bus = es_can.get("bus") if isinstance(es_can, dict) else None
+    pods = bus.get("POD") if isinstance(bus, dict) else None
+    pod_summary = None
+    if isinstance(pods, list):
+        pod_summary = [
+            {
+                key: (pod.get("POD_EnergyStatus") or {}).get(key)
+                for key in ("isMIA", "POD_nom_full_pack_energy", "POD_nom_energy_remaining")
+            }
+            if isinstance(pod, dict) and isinstance(pod.get("POD_EnergyStatus"), dict)
+            else None
+            for pod in pods
+        ]
+    return {
+        "leader_din": leader_din,
+        "block_dins": raw_dins,
+        "pw3_follower_dins": pw3_follower_dins(battery_blocks or [], leader_din),
+        "pw2_dins": mixed_site_pw2_dins(battery_blocks or [], leader_din),
+        "pod": pod_summary,
+        "pod_valid": len(_pw2_pod_readings(data)),
+    }
 
 
 def build_mixed_site_pw2_packs(
