@@ -22,7 +22,7 @@ MAX_RETRY_SECONDS = 3600
 # Repeat an unchanged "still held" reason at most this often.
 HELD_LOG_REPEAT_SECONDS = 1800
 # At most one independent cloud read per held vehicle in this interval.
-EXPIRY_READ_INTERVAL_SECONDS = 15 * 60
+EXPIRY_READ_INTERVAL_SECONDS = 5 * 60
 _LOGGER = logging.getLogger(__name__)
 install_vin_log_filter(_LOGGER)
 
@@ -140,6 +140,14 @@ class NativeRecoveryWorker:
             reason = "a charging command is in flight"
         elif reason is None and now < cutoff:
             reason = f"waiting {int(cutoff - now)} s for the unconfirmed command to settle"
+        elif reason is None and not recovery.ble_attempt_expiry_needs_report(
+                self.hass, self.entry, vin):
+            # A lost rate write cannot start or stop charging: retire it now,
+            # without a cloud read.
+            retired, reason = await recovery.async_expire_settled_ble_attempts(
+                self.hass, self.entry, vin, None,
+                authorize=lambda: self._writers_free(vin),
+            )
         elif reason is None and now - self.expiry_read_at.get(vin, 0) < EXPIRY_READ_INTERVAL_SECONDS:
             reason = "waiting before the next independent vehicle read"
         elif reason is None:

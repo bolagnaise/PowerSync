@@ -5501,6 +5501,8 @@ async def _set_ev_charging_amps_ble(
     command_dispatched = False
     _tesla_ble_mark_mutation_prewrite()
     try:
+        if _tesla_ble_bridge_current_satisfied(hass, ble_prefix, amps_entity, capped_amps):
+            return True
         if await _tesla_ble_native_current_satisfied(
             hass,
             params,
@@ -5687,6 +5689,53 @@ async def _set_ev_charging_amps_ble(
         if type(e).__name__ in {"ServiceNotFound", "ServiceValidationError"}:
             return False
         return None if command_dispatched else False
+
+
+_TESLA_BLE_LIVE_POLL_SECONDS = 120
+
+
+def _tesla_ble_bridge_current_satisfied(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    amps_entity: str,
+    target_amps: int,
+) -> bool:
+    """Skip a BLE current write the car already reports.
+
+    ESPHome suppresses an unchanged value, so re-writing the car's current
+    limit can never be read back and would leave an unknown command that
+    blocks charging. When the bridge is polling the car (its last-update
+    sample is recent) and the car-reported limit already equals the target,
+    the write would change nothing: report success without sending it.
+    """
+    if not _tesla_ble_radio_available(hass, ble_prefix, report=False):
+        return False
+    limit = hass.states.get(f"sensor.{ble_prefix}_current_limit")
+    number = hass.states.get(amps_entity)
+    poll = hass.states.get(_TESLA_BLE_SENSOR_LAST_UPDATE.format(prefix=ble_prefix))
+    if limit is None or number is None or poll is None:
+        return False
+    try:
+        if any(not math.isfinite(float(item.state)) or abs(float(item.state) - target_amps) >= 0.1
+               for item in (limit, number)):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if str(poll.state).strip().lower() in ("", "unknown", "unavailable"):
+        return False
+    polled_at = getattr(poll, "last_updated", None)
+    if not isinstance(polled_at, datetime):
+        return False
+    if polled_at.tzinfo is None:
+        polled_at = polled_at.replace(tzinfo=dt_timezone.utc)
+    age = (datetime.now(dt_timezone.utc) - polled_at).total_seconds()
+    if not 0 <= age <= _TESLA_BLE_LIVE_POLL_SECONDS:
+        return False
+    _LOGGER.debug(
+        "Tesla BLE %s already reports %sA; the current write was not sent",
+        ble_prefix, target_amps,
+    )
+    return True
 
 
 async def _tesla_ble_native_current_satisfied(

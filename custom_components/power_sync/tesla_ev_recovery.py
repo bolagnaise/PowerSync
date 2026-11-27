@@ -3951,13 +3951,20 @@ def ev_recovery_status(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any]
 
 # An unconfirmed BLE command blocks every later command to its vehicle until
 # its effect is known. Without an expiry, one lost readback stopped all
-# charging indefinitely. After this settle window, an independent native cloud
-# report that already shows the command's effect proves a late execution
-# would change nothing, so the attempt can be retired.
-BLE_ATTEMPT_SETTLE_SECONDS = 15 * 60
-_STOPPED_CHARGE_STATES = frozenset({"stopped", "complete", "disconnected", "nopower"})
-_STOPPED_MAX_POWER_KW = 0.05
-_EXPIRABLE_BLE_OPERATIONS = ("stop", "rate")
+# charging indefinitely.
+#
+# A rate write cannot start or stop charging: whether it landed or not, the car
+# runs at its old or its new amps, both inside the configured range, and the
+# next start or adjustment writes its own rate. An unknown rate is therefore
+# retired straight away, without a settle window or a cloud read.
+#
+# A Start or Stop decides whether the car charges. After a short settle window
+# (a BLE command lands within seconds or not at all), any fresh independent
+# cloud report of the charging state ends the uncertainty, whatever it shows:
+# control then resumes from the car's real state instead of staying held.
+BLE_ATTEMPT_SETTLE_SECONDS = 3 * 60
+_EXPIRABLE_BLE_OPERATIONS = ("start", "stop", "rate")
+_REPORTLESS_BLE_OPERATIONS = ("rate",)
 
 
 def _unresolved_ble_attempts(ledger: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
@@ -4006,7 +4013,8 @@ def _settled_ble_expiry_plan(
         submitted = _epoch(record.get("submitted_epoch"))
         if submitted is None:
             return [], [], None, f"{operation} attempt {key}: attempt has no submission time"
-        cutoff = max(cutoff, submitted + BLE_ATTEMPT_SETTLE_SECONDS)
+        if operation not in _REPORTLESS_BLE_OPERATIONS:
+            cutoff = max(cutoff, submitted + BLE_ATTEMPT_SETTLE_SECONDS)
     pending_keys = {key for key, _ in pending}
     state = runtime[_SIDECAR_STATE_KEY]
     releasable = []
@@ -4059,10 +4067,14 @@ def _independent_report_reason(observation: Any, fields: tuple[str, ...]) -> str
 def _settled_ble_attempt_reason(
     record: Mapping[str, Any], observation: Any, now: float,
 ) -> str | None:
-    """Return None when a retained BLE attempt's effect is proven, else why not."""
+    """Return None when a retained BLE attempt can be retired, else why not."""
     operation = str(record.get("operation") or "").strip().lower()
     if operation not in _EXPIRABLE_BLE_OPERATIONS:
         return f"{operation or 'unknown'} commands are not expired automatically"
+    if operation in _REPORTLESS_BLE_OPERATIONS:
+        # Old or new amps: either is a valid rate and neither changes whether
+        # the car charges. The next rate write replaces it.
+        return None
     submitted = _epoch(record.get("submitted_epoch"))
     if submitted is None:
         return "attempt has no submission time"
@@ -4075,38 +4087,26 @@ def _settled_ble_attempt_reason(
     observed_at = _epoch(getattr(observation, "source_charge_timestamp", None))
     if observed_at is None or observed_at < settle_at:
         return "latest independent vehicle reading predates the settle window"
-    state = str(getattr(observation, "charge_state", "") or "").strip().lower()
-    power = getattr(observation, "charger_power", None)
-    stopped = (state in _STOPPED_CHARGE_STATES and power is not None
-               and power <= _STOPPED_MAX_POWER_KW)
-    if operation == "stop":
-        if stopped:
-            return None
-        return f"stop not observed (vehicle reports {state or 'unknown'}, {power} kW)"
-    if stopped:
-        # A late rate write cannot add draw to a stopped car, and every new
-        # start pre-sets its own rate first.
-        return None
-    bound = record["route"].get("effect_bound")
-    if not isinstance(bound, Mapping) or bound.get("kind") != "rate":
-        return "rate attempt has no recorded amp range"
-    low, high = _epoch(bound.get("min_amps")), _epoch(bound.get("max_amps"))
-    if low is None or high is None:
-        return "rate attempt has no recorded amp range"
-    reason = _independent_report_reason(observation, ("requested_current",))
-    if reason:
-        return reason
-    requested = getattr(observation, "requested_current", None)
-    if requested is None:
-        return "vehicle reading has no requested current"
-    # The bound lists the only values the BLE write could have submitted (the
-    # request and, with a stale entity max, its lower fallback), not a range:
-    # a value in between proves neither, so a late write could still land.
-    possible = sorted({low, high})
-    if requested in possible:
-        return None
-    shown = " or ".join(f"{value:g}A" for value in possible)
-    return f"vehicle requests {requested:g}A, not the command's {shown}"
+    # The settled report is the car's real charging state. Normal control
+    # resumes from it, whether or not the command took effect.
+    return None
+
+
+def ble_attempt_expiry_needs_report(hass: Any, entry: Any, vehicle_id: Any) -> bool:
+    """Whether retiring this vehicle's BLE attempts needs a cloud report.
+
+    Rate-only uncertainty is retired without one, so no paid read is made.
+    """
+    runtime = _runtime(hass, entry)
+    if runtime is None:
+        return True
+    ledger = _ledger(runtime, str(vehicle_id or ""), migrate=False)
+    if not isinstance(ledger, dict):
+        return True
+    pending = _unresolved_ble_attempts(ledger)
+    return not pending or any(
+        str(record.get("operation") or "").strip().lower() not in _REPORTLESS_BLE_OPERATIONS
+        for _, record in pending)
 
 
 async def async_expire_settled_ble_attempts(
@@ -4114,7 +4114,7 @@ async def async_expire_settled_ble_attempts(
 ) -> tuple[bool, str]:
     """Retire unconfirmed BLE attempts whose effect an independent report proves.
 
-    Only stop and rate attempts qualify, and only when no BLE quarantine
+    Start, stop and rate attempts qualify, only when no BLE quarantine
     hazard or non-BLE uncertainty remains. Anything unproven stays held.
     The durable sidecar is the commit point, as for the bridge recovery.
     Returns ``(retired, reason)``.

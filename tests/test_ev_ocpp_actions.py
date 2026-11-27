@@ -16595,6 +16595,56 @@ def test_ble_rate_update_uses_fresh_charging_telemetry_without_wake(monkeypatch)
     assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 13)) is True
 
 
+def _ble_equal_limit_hass(*, polled_age=30, limit="6", number="6"):
+    now = datetime.now(timezone.utc)
+    return _Hass([
+        _State("number.car_charging_amps", number, {"min": 1, "max": 32}),
+        _State("sensor.car_current_limit", limit, last_updated=now - timedelta(minutes=10)),
+        _State("sensor.car_charging_state", "Stopped", last_updated=now - timedelta(minutes=10)),
+        _State("sensor.car_last_update", "Fri Nov 27 12:20:41 2026",
+               last_updated=now - timedelta(seconds=polled_age)),
+    ])
+
+
+def test_ble_rate_already_reported_by_the_car_is_not_rewritten(monkeypatch):
+    """Live 2026-11-27: a 6 A write to a car already at 6 A was never read back.
+
+    ESPHome suppresses the unchanged value, so the write stayed unknown and
+    blocked the Smart Schedule start. A live bridge already reporting the
+    target means the write would change nothing.
+    """
+    hass = _ble_equal_limit_hass()
+
+    async def must_not_send(*args, **kwargs):
+        raise AssertionError("an unchanged current limit must not be written")
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", must_not_send)
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", must_not_send)
+    hass.services.async_call = must_not_send
+
+    assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 6)) is True
+    assert hass.services.calls == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"polled_age": 600},          # the bridge has stopped polling the car
+    {"limit": "8"},               # the car reports a different limit
+    {"number": "8"},              # the requested value differs
+])
+def test_ble_rate_skip_needs_a_live_matching_car_report(monkeypatch, changes):
+    hass = _ble_equal_limit_hass(**changes)
+    reached = []
+
+    async def prepare(*args, **kwargs):
+        reached.append(True)
+        return False
+
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", prepare)
+
+    asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 6))
+    assert reached == [True]
+
+
 def test_ble_rate_update_uses_fresh_power_when_charging_state_is_unchanged(monkeypatch):
     """Ticket #56: unchanged BLE Charging state must not force a wake."""
     now = datetime.now(timezone.utc)
