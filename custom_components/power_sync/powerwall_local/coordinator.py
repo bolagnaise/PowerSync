@@ -30,9 +30,16 @@ from ..tesla_calibration import (
     CALIBRATION_SOURCE_MODE_STICK,
     CALIBRATION_CYCLE_FULL_SOC,
     CALIBRATION_CYCLE_LOW_SOC,
+    CALIBRATION_EXPORT_REFUSED_KEY,
+    CALIBRATION_EXPORT_REFUSED_LATCH_KEY,
+    CALIBRATION_EXPORT_REFUSED_SINCE_KEY,
     CALIBRATION_IGNORED_CHARGE_MAX_SOC,
     CALIBRATION_IGNORED_CHARGE_MAX_W,
     CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W,
+    CALIBRATION_REFUSED_DISCHARGE_MAX_W,
+    CALIBRATION_REFUSED_DISCHARGE_MIN_IMPORT_W,
+    CALIBRATION_REFUSED_DISCHARGE_MIN_SOC,
+    CALIBRATION_REFUSED_DISCHARGE_RESERVE_MARGIN,
     CALIBRATION_REQUEST_ACK_KEY,
     CALIBRATION_TAKEOVER_CONFIRM_SECONDS,
     CALIBRATION_TAKEOVER_LATCH_KEY,
@@ -40,6 +47,7 @@ from ..tesla_calibration import (
     CALIBRATION_TAKEOVER_MIN_DISCHARGE_W,
     CALIBRATION_TAKEOVER_SINCE_KEY,
     calibration_sources,
+    clear_calibration_export_refusal,
     dispatch_calibration_state,
     powerwall_calibration_alert_active,
     powerwall_calibration_request_only,
@@ -415,10 +423,17 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 # A request alone does not mean Tesla has taken over; some
                 # gateways keep it raised for days while following commands.
                 alert_active = False
+            self._track_calibration_export_refusal(entry_data, snap)
         else:
             entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
             if not alert_active:
                 entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
+                if clear_calibration_export_refusal(entry_data):
+                    _LOGGER.info(
+                        "Powerwall calibration request cleared — forced battery "
+                        "export is allowed again"
+                    )
+                    self._request_calibration_reoptimization(entry_data)
 
         if alert_active:
             entry_data["_calibration_alert_clear_polls"] = 0
@@ -522,6 +537,132 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         now = time.monotonic()
         since = entry_data.setdefault(CALIBRATION_TAKEOVER_SINCE_KEY, now)
         return now - since >= CALIBRATION_TAKEOVER_CONFIRM_SECONDS
+
+    def _track_calibration_export_refusal(
+        self, entry_data: dict[str, Any], snap: PowerwallSnapshot
+    ) -> None:
+        """Latch export-only protection when Tesla refuses a force discharge.
+
+        Runs only while CalibrationRequested is the sole calibration alert.
+        The gateway may still follow charge commands, so this never pauses
+        charging; it only stops PowerSync forcing or planning battery export.
+        """
+        latch = entry_data.get(CALIBRATION_EXPORT_REFUSED_LATCH_KEY)
+        if isinstance(latch, dict):
+            if self._calibration_takeover_finished(latch, snap):
+                clear_calibration_export_refusal(entry_data)
+                _LOGGER.info(
+                    "Powerwall calibration cycle finished while CalibrationRequested "
+                    "remains raised — forced battery export is allowed again"
+                )
+                self._request_calibration_reoptimization(entry_data)
+            return
+        refused = snap.grid_status == "SystemGridConnected" and self._force_discharge_refused(
+            entry_data.get("force_discharge_state"), snap
+        )
+        if not refused:
+            entry_data.pop(CALIBRATION_EXPORT_REFUSED_SINCE_KEY, None)
+            return
+        now = time.monotonic()
+        since = entry_data.setdefault(CALIBRATION_EXPORT_REFUSED_SINCE_KEY, now)
+        if now - since < CALIBRATION_TAKEOVER_CONFIRM_SECONDS:
+            return
+        entry_data.pop(CALIBRATION_EXPORT_REFUSED_SINCE_KEY, None)
+        entry_data[CALIBRATION_EXPORT_REFUSED_LATCH_KEY] = {
+            "since": time.time(),
+            "min_soc": snap.soc if isinstance(snap.soc, (int, float)) else None,
+        }
+        entry_data[CALIBRATION_EXPORT_REFUSED_KEY] = True
+        _LOGGER.warning(
+            "Tesla is holding the Powerwall and importing from the grid against "
+            "PowerSync's force discharge while CalibrationRequested is raised — "
+            "stopping forced battery export until the calibration finishes"
+        )
+        self._request_calibration_reoptimization(entry_data)
+        self._schedule_export_refusal_notification()
+
+    def _schedule_export_refusal_notification(self) -> None:
+        """Tell the owner once, without delaying the snapshot loop."""
+        services = getattr(self.hass, "services", None)
+        create_task = getattr(self.hass, "async_create_task", None)
+        if services is None or not callable(create_task):
+            return
+
+        async def _notify() -> None:
+            try:
+                await services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": "Powerwall export paused for calibration",
+                        "message": (
+                            "Tesla has requested a Powerwall calibration and is "
+                            "refusing forced export: during a PowerSync force "
+                            "discharge the battery held its charge and the house "
+                            "imported from the grid. PowerSync will not force or "
+                            "plan battery export until the calibration request "
+                            "clears or a full drain-and-refill cycle completes. "
+                            "Charging and normal self-consumption continue. Use "
+                            "Refresh Calibration to retry export sooner."
+                        ),
+                        "notification_id": (
+                            f"power_sync_calibration_export_{self._entry_id}"
+                        ),
+                    },
+                    blocking=False,
+                )
+            except Exception:  # noqa: BLE001 - notification is best effort
+                _LOGGER.debug("Calibration export notification failed", exc_info=True)
+
+        try:
+            create_task(_notify())
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Calibration export notification scheduling failed", exc_info=True)
+
+    @staticmethod
+    def _force_discharge_refused(force_discharge: Any, snap: PowerwallSnapshot) -> bool:
+        """Return True when the battery holds and the house imports during a force discharge.
+
+        A working force discharge covers the house before exporting, so a
+        charged battery that stays idle while the grid supplies the load is
+        refusing the command.  Small explicit discharge targets, low SOC and
+        a battery at its reserve can legitimately look the same, so they are
+        never evidence.
+        """
+        if not (isinstance(force_discharge, dict) and force_discharge.get("active")):
+            return False
+        target = force_discharge.get("power_w")
+        if (
+            isinstance(target, (int, float))
+            and not isinstance(target, bool)
+            and 0 < target < CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W
+        ):
+            return False
+        battery_w, grid_w, soc = snap.battery_w, snap.grid_w, snap.soc
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (battery_w, grid_w, soc)
+        ):
+            return False
+        reserve = snap.backup_reserve_percent
+        if not isinstance(reserve, (int, float)) or isinstance(reserve, bool):
+            reserve = 0
+        return (
+            soc >= CALIBRATION_REFUSED_DISCHARGE_MIN_SOC
+            and soc >= reserve + CALIBRATION_REFUSED_DISCHARGE_RESERVE_MARGIN
+            and battery_w < CALIBRATION_REFUSED_DISCHARGE_MAX_W
+            and grid_w > CALIBRATION_REFUSED_DISCHARGE_MIN_IMPORT_W
+        )
+
+    def _request_calibration_reoptimization(self, entry_data: dict[str, Any]) -> None:
+        """Ask the optimiser to replan now that Tesla has taken the battery."""
+        optimizer = entry_data.get("optimization_coordinator")
+        schedule = getattr(optimizer, "_schedule_settings_reoptimization", None)
+        if callable(schedule):
+            try:
+                schedule()
+            except Exception:  # noqa: BLE001 - the regular cycle still replans
+                _LOGGER.debug("Calibration re-optimisation request failed", exc_info=True)
 
     @staticmethod
     def _force_charge_target_limited(force_charge: dict[str, Any]) -> bool:

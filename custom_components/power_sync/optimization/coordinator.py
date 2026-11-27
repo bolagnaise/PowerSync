@@ -12147,10 +12147,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if _calibration_data.get("calibration_suspected"):
             active_force = self._get_active_force_state()
+            # A force discharge that calibration refuses imports from the
+            # grid instead of exporting, so it falls through to the normal
+            # mismatch path, which restores self-consumption.
             if (
                 active_force
                 and active_force.get("active")
                 and active_force.get("source") == "optimizer"
+                and active_force.get("type") != "discharge"
             ):
                 _LOGGER.info(
                     "Optimizer: calibration suspected - holding active optimizer force "
@@ -12247,7 +12251,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     force_type == "discharge"
                     and getattr(action, "_optimizer_bridged_export_gap", False)
                 )
-                if preserve_active_for_force and force_type == "discharge":
+                if force_type == "discharge" and self._calibration_blocks_battery_export():
+                    # Calibration refuses the forced export; never extend it.
+                    lp_matches_force = False
+                elif preserve_active_for_force and force_type == "discharge":
                     lp_matches_force = False
                 elif bridged_export_gap:
                     # The bridge keeps the action in export mode for the LP,
@@ -13042,6 +13049,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.info(
                     "Optimizer: Skipping %s — calibration suspected, using self_consumption",
                     effective_action,
+                )
+                effective_action = "self_consumption"
+            elif _cal_ed.get("calibration_export_refused") and effective_action == "export":
+                _LOGGER.info(
+                    "Optimizer: Skipping export — Tesla refuses forced export while "
+                    "calibration is requested, using self_consumption"
                 )
                 effective_action = "self_consumption"
 
@@ -14243,6 +14256,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return []
 
         allowed = [False] * n
+        if self._calibration_blocks_battery_export():
+            # Tesla refuses forced export during calibration and the gateway
+            # can import at peak instead. Plan self-consumption until it ends.
+            return allowed
 
         slot_sources = [
             self._flow_power_profit_export_slots(n),
@@ -14281,6 +14298,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return allowed
 
+    def _calibration_blocks_battery_export(self) -> bool:
+        """Return True while Tesla calibration owns or refuses battery export."""
+        from ..const import DOMAIN as _CAL_DOMAIN
+
+        hass = getattr(self, "hass", None)
+        data = getattr(hass, "data", None)
+        if not isinstance(data, dict):
+            return False
+        entry_data = data.get(_CAL_DOMAIN, {}).get(getattr(self, "entry_id", None), {})
+        return isinstance(entry_data, dict) and bool(
+            entry_data.get("calibration_suspected")
+            or entry_data.get("calibration_export_refused")
+        )
+
     def _priority_export_slots_for_run(
         self,
         n: int,
@@ -14291,6 +14322,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return []
 
         allowed = [False] * n
+        if self._calibration_blocks_battery_export():
+            return allowed
         slot_sources = [
             self._agl_battery_reward_export_slots(n, export_prices),
             self._flow_power_export_window_slots(n),
@@ -23120,6 +23153,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         from ..const import DOMAIN as _CAL_DOMAIN
         _cal_entry_data = self.hass.data.get(_CAL_DOMAIN, {}).get(self.entry_id, {})
         data["calibration_suspected"] = _cal_entry_data.get("calibration_suspected", False)
+        data["calibration_export_refused"] = bool(
+            _cal_entry_data.get("calibration_export_refused", False)
+        )
         _cal_detected_at = _cal_entry_data.get("calibration_detected_at")
         data["calibration_detected_at"] = _cal_detected_at.isoformat() if _cal_detected_at else None
         data["calibration_source"] = _cal_entry_data.get("calibration_source")

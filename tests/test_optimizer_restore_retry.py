@@ -1055,3 +1055,62 @@ def test_tesla_idle_retains_reserve_when_tariff_charge_lacks_ev_headroom(opt_mod
         assert coordinator._last_executed_action == "idle"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("flag", ["calibration_suspected", "calibration_export_refused"])
+def test_calibration_releases_refused_optimizer_force_discharge(opt_module, flag):
+    """Tesla refuses a forced export during calibration and imports instead.
+
+    Owner site 2026-11-27: the native force discharge held the battery while
+    the house imported at peak. The optimiser must not keep that force alive;
+    it restores normal self-consumption, which the gateway still follows.
+    """
+    async def _run():
+        calls = []
+
+        async def force_discharge(**kwargs):
+            calls.append(("force_discharge", kwargs))
+            return True
+
+        async def restore_normal():
+            calls.append(("restore_normal", None))
+            return True
+
+        battery = SimpleNamespace(
+            force_discharge=force_discharge, restore_normal=restore_normal,
+            set_self_consumption_mode=restore_normal,
+        )
+        coordinator = _execute_coordinator(opt_module, battery)
+        coordinator.battery_system = "tesla"
+        coordinator.hass.data = {"power_sync": {"test-entry": {flag: True}}}
+        coordinator._get_active_force_state = lambda: {
+            "active": True, "source": "optimizer", "type": "discharge",
+            "scope": "external",
+        }
+        coordinator._force_state_clearer = lambda: calls.append(("clear", None))
+        coordinator._last_executed_action = "export"
+        coordinator._last_executed_planned_action = "export"
+
+        await coordinator._execute_optimizer_action(
+            SimpleNamespace(
+                timestamp=datetime(2026, 11, 27, 10, 0, tzinfo=timezone.utc),
+                action="export", power_w=10_000.0, soc=0.77,
+                battery_charge_w=0.0, battery_discharge_w=10_000.0,
+            )
+        )
+
+        assert not [c for c in calls if c[0] == "force_discharge"]
+        assert ("restore_normal", None) in calls
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("flag", ["calibration_suspected", "calibration_export_refused"])
+def test_calibration_blocks_planned_battery_export(opt_module, flag):
+    """Plans stay self-consumption while Tesla calibration refuses export."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.entry_id = "test-entry"
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"test-entry": {flag: True}}})
+    assert coordinator._battery_export_allowed_slots(6, [5.0] * 6) == [False] * 6
+    assert coordinator._priority_export_slots_for_run(6, [5.0] * 6) == [False] * 6
+

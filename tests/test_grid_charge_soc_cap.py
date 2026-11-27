@@ -643,3 +643,55 @@ def test_runtime_amber_spike_blocks_cached_charge_and_retries_restore(
     else:
         assert coordinator._last_executed_action == "self_consumption"
         assert not coordinator._optimizer_force_state
+
+
+@pytest.mark.parametrize(
+    "calibration, expect_charge",
+    [
+        ({"calibration_export_refused": True}, True),
+        ({"calibration_suspected": True}, False),
+    ],
+    ids=["export_refusal_keeps_charging", "full_calibration_pause"],
+)
+def test_calibration_export_refusal_never_pauses_charging(opt_module, calibration, expect_charge):
+    """A gateway refusing forced export still follows charge commands."""
+    calls = []
+
+    class Battery:
+        async def force_charge(self, **kwargs):
+            calls.append(("charge", kwargs))
+            return True
+
+        async def restore_normal(self):
+            calls.append(("restore", None))
+            return True
+
+        async def set_self_consumption_mode(self):
+            calls.append(("self_consumption", None))
+            return True
+
+    coordinator = _coordinator(opt_module)
+    coordinator._enabled = True
+    coordinator._executor = SimpleNamespace(battery_controller=Battery())
+    coordinator._optimizer_restore_in_progress = False
+    coordinator._effective_runtime_action = lambda action: action
+    coordinator._solar_export_hold = None
+    coordinator._monitoring_mode_active = lambda: False
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": dict(calibration)}})
+    coordinator.entry_id = "entry-1"
+    coordinator.battery_system = "custom"
+    coordinator._scheduled_ev_preserve_active = lambda: False
+    coordinator._grid_charge_blackout_active_now = lambda: False
+    coordinator._scheduled_ev_no_discharge_active = False
+    coordinator._optimizer_force_state = None
+    coordinator._force_state_clearer = None
+    coordinator._get_active_force_state = lambda: {"active": False}
+    coordinator._last_executed_action = None
+    coordinator._last_executed_planned_action = None
+    action = SimpleNamespace(
+        action="charge", power_w=5000.0, soc=0.3,
+        battery_charge_w=5000.0, battery_discharge_w=0.0,
+        timestamp=opt_module.dt_util.now(),
+    )
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert bool([c for c in calls if c[0] == "charge"]) is expect_charge, calls
