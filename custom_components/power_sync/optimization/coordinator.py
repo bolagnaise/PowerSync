@@ -19830,8 +19830,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         *,
         timestamp: datetime,
         capacity_wh: float,
+        passive: bool = False,
     ) -> None:
-        """Feed one normalized telemetry sample to the closed-cycle learner."""
+        """Feed one normalized telemetry sample to the closed-cycle learner.
+
+        ``passive`` observations come from provider update notifications.  An
+        unusable passive sample is skipped rather than rejected; the solve-time
+        observation and the learner's gap limit keep the fail-closed checks.
+        """
         data = self._get_energy_data()
         if not isinstance(data, dict):
             return
@@ -19864,6 +19870,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if level_percent is not None and 0 <= level_percent <= 100
             else None
         )
+        if passive and (
+            not fresh
+            or data.get("telemetry_ready") is False
+            or measured_soc is None
+            or data.get("battery_power") is None
+        ):
+            return
         result = self._battery_efficiency_learner.observe(
             timestamp=observed_at.astimezone(timestamp.tzinfo) if fresh else timestamp,
             soc=measured_soc,
@@ -20503,6 +20516,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             # Accounting must not abort the provider's telemetry notification.
             _LOGGER.exception("Measured cost tracking failed for energy update")
+        try:
+            # Integrate every measured SOC/power pair, not only one per solve.
+            # Five-minute endpoints alias brief charge/discharge reversals,
+            # which discarded open cycles and distorted their energy totals.
+            self._observe_battery_efficiency(
+                timestamp=dt_util.now(),
+                capacity_wh=self._config.battery_capacity_wh,
+                passive=True,
+            )
+        except Exception:
+            _LOGGER.exception("Battery efficiency learning failed for energy update")
 
     def _track_actual_cost(self, *, force: bool = False) -> None:
         """Track actual electricity cost using real elapsed time.

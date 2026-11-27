@@ -552,3 +552,108 @@ def test_sign_reversal_uses_interval_energy_direction_and_return_prefix():
     charge, discharge = MODULE._integrate_directional_energy(-4,4,1)
     assert charge == pytest.approx(1)
     assert discharge == pytest.approx(1)
+
+
+def _burst_cycle_profile(start, *, step_seconds=30):
+    """Ticket 181: a 4-minute charge burst hidden between 5-minute endpoints.
+
+    Truth uses 0.9 one-way efficiency in each direction (0.81 round trip).
+    Discharge at 3.3 kW, with a -10 kW charge burst from 60.5 to 64.5 minutes,
+    then recharge at -5 kW back through the 50% anchor.
+    """
+    capacity, eta = 27.0, 0.9
+
+    def power_at(minutes):
+        if 60.5 <= minutes < 64.5:
+            return -10.0
+        return 3.3 if minutes < 120 else -5.0
+
+    rows, soc, minutes = [], 0.50, 0.0
+    while minutes <= 400:
+        power = power_at(minutes)
+        rows.append((start + timedelta(minutes=minutes), soc, power))
+        dt_hours = step_seconds / 3600.0
+        delta = (-power * eta if power < 0 else -power / eta) * dt_hours / capacity
+        soc += delta
+        minutes += step_seconds / 60.0
+        if minutes > 120 and soc > 0.51:
+            rows.append((start + timedelta(minutes=minutes), soc, power_at(minutes)))
+            break
+    return rows
+
+
+def _feed_rows(learner, rows):
+    for at, soc, power in rows:
+        learner.observe(
+            timestamp=at, soc=soc, battery_power_kw=power,
+            capacity_kwh=27.0, topology_fingerprint="tesla-ac",
+        )
+
+
+def test_five_minute_endpoints_alias_a_charge_burst_and_discard_the_cycle():
+    rows = _burst_cycle_profile(datetime(2026, 11, 21, 0, 30, tzinfo=timezone.utc))
+    five_minute = [row for row in rows if row[0].second == 0 and row[0].minute % 5 == 0]
+    learner = BatteryEfficiencyLearner()
+    _feed_rows(learner, five_minute)
+    assert learner.rejections["power_soc_direction_mismatch"] >= 1
+    assert learner.history == []
+
+
+def test_every_measured_update_learns_the_cycle_through_a_charge_burst():
+    rows = _burst_cycle_profile(datetime(2026, 11, 21, 0, 30, tzinfo=timezone.utc))
+    learner = BatteryEfficiencyLearner()
+    _feed_rows(learner, rows)
+    assert learner.rejections["power_soc_direction_mismatch"] == 0
+    assert len(learner.history) == 1
+    assert learner.history[0].round_trip_efficiency == pytest.approx(0.81, abs=0.01)
+
+
+def test_energy_update_listener_feeds_learner_and_skips_unusable_samples():
+    now = datetime.now(timezone.utc)
+    captured = []
+    learner = SimpleNamespace(
+        observe=lambda **kw: captured.append(kw) or MODULE.ObservationResult(False)
+    )
+    calls = []
+    data = {"battery_level": 50.0, "battery_power": 3.3,
+            "last_update": now - timedelta(seconds=20)}
+    on_update, observe = _coordinator_methods(
+        "_on_cost_energy_update", "_observe_battery_efficiency"
+    )
+    coordinator = SimpleNamespace(
+        _cost_tracking_stopping=False,
+        _track_actual_cost=lambda force=False: calls.append(force),
+        _config=SimpleNamespace(battery_capacity_wh=27000),
+        _get_energy_data=lambda: data,
+        _battery_efficiency_learner=learner,
+        _battery_efficiency_topology_fingerprint=lambda capacity: f"ac|{capacity}",
+        _schedule_battery_efficiency_learning_save=lambda: None,
+    )
+    coordinator._observe_battery_efficiency = (
+        lambda **kw: observe(coordinator, **kw)
+    )
+
+    on_update(coordinator)
+    assert calls == [True]
+    assert len(captured) == 1
+    assert captured[0]["timestamp"] == now - timedelta(seconds=20)
+    assert captured[0]["capacity_kwh"] == pytest.approx(27.0)
+    assert captured[0]["topology_fingerprint"] == "ac|27000"
+    assert captured[0]["valid"] is True
+
+    # A stale or not-ready passive notification must not discard an open
+    # cycle; only the solve-time observation applies the stale rejection.
+    data["last_update"] = now - timedelta(minutes=5)
+    on_update(coordinator)
+    data["last_update"] = now
+    data["telemetry_ready"] = False
+    on_update(coordinator)
+    data.pop("telemetry_ready")
+    data["battery_power"] = None
+    on_update(coordinator)
+    assert len(captured) == 1
+
+    # Learner failures cannot escape into the provider notification.
+    coordinator._observe_battery_efficiency = lambda **kw: 1 / 0
+    on_update(coordinator)
+    assert calls == [True] * 5
