@@ -6,12 +6,20 @@ always pauses automatic control.  ``CalibrationRequested`` is only a request:
 some gateways keep it raised for days while following owner commands, while
 others take over the battery straight away and ignore charge commands.  It
 therefore pauses control only after Tesla is seen discharging against an
-active PowerSync charge or hold, until the alert clears, a drain-and-refill
+active PowerSync charge or hold, or resting against a force charge, until the alert clears, a drain-and-refill
 cycle completes, 72 hours pass, or the owner runs ``refresh_calibration``
 (which also acknowledges a lingering request until it clears).  Older PowerSync releases could only infer a
 calibration after repeated cloud operation-mode verification failures.  This
 module keeps both signals as independent sources and derives the compatibility
 ``calibration_suspected`` flag used by the optimiser and service guards.
+
+A gateway can also keep following charge commands while refusing forced
+export: under Time-Based Control it holds the battery and the house imports
+from the grid.  That evidence sets a separate export-only latch
+(``calibration_export_refused``), so PowerSync stops forcing and planning
+battery export without pausing charging, until the request clears, a
+drain-and-refill cycle completes, 72 hours pass, or the owner runs
+``refresh_calibration``.
 """
 
 from __future__ import annotations
@@ -40,6 +48,17 @@ CALIBRATION_TAKEOVER_CONFIRM_SECONDS = 180.0
 CALIBRATION_IGNORED_CHARGE_MAX_W = 500.0
 CALIBRATION_IGNORED_CHARGE_MAX_SOC = 95.0
 CALIBRATION_IGNORED_CHARGE_MIN_TARGET_W = 1000.0
+# Tesla can also refuse a force discharge: with Time-Based Control the
+# gateway holds (or trickle-charges) the battery and the house imports from
+# the grid, even with ample charge.  Observed 2026-11-27 under a lingering
+# CalibrationRequested: battery 0 to -0.3 kW, grid +2.5 kW at 77% SOC.
+CALIBRATION_REFUSED_DISCHARGE_MAX_W = 500.0
+CALIBRATION_REFUSED_DISCHARGE_MIN_IMPORT_W = 500.0
+CALIBRATION_REFUSED_DISCHARGE_MIN_SOC = 20.0
+CALIBRATION_REFUSED_DISCHARGE_RESERVE_MARGIN = 10.0
+CALIBRATION_EXPORT_REFUSED_KEY = "calibration_export_refused"
+CALIBRATION_EXPORT_REFUSED_SINCE_KEY = "_calibration_export_refused_since"
+CALIBRATION_EXPORT_REFUSED_LATCH_KEY = "_calibration_export_refused_latch"
 # Tesla completes a calibration within 72 hours; a requested-only pause never
 # outlives that, nor a completed drain-and-refill cycle.
 CALIBRATION_TAKEOVER_MAX_SECONDS = 72 * 3600
@@ -170,6 +189,8 @@ def clear_calibration_sources(entry_data: dict[str, Any]) -> CalibrationTransiti
         entry_data[CALIBRATION_REQUEST_ACK_KEY] = True
     entry_data.pop(CALIBRATION_TAKEOVER_SINCE_KEY, None)
     entry_data.pop(CALIBRATION_TAKEOVER_LATCH_KEY, None)
+    if clear_calibration_export_refusal(entry_data):
+        entry_data[CALIBRATION_REQUEST_ACK_KEY] = True
     entry_data["_calibration_sources"] = []
     entry_data["calibration_sources"] = []
     entry_data["calibration_source"] = None
@@ -183,6 +204,22 @@ def clear_calibration_sources(entry_data: dict[str, Any]) -> CalibrationTransiti
         completed=was_active,
         sources=(),
     )
+
+
+def calibration_export_refused(entry_data: Any) -> bool:
+    """Return True while Tesla is known to refuse forced battery export."""
+    return isinstance(entry_data, dict) and bool(
+        entry_data.get(CALIBRATION_EXPORT_REFUSED_KEY)
+    )
+
+
+def clear_calibration_export_refusal(entry_data: dict[str, Any]) -> bool:
+    """Clear the export-only latch; return True when it was set."""
+    was_set = calibration_export_refused(entry_data)
+    entry_data.pop(CALIBRATION_EXPORT_REFUSED_SINCE_KEY, None)
+    entry_data.pop(CALIBRATION_EXPORT_REFUSED_LATCH_KEY, None)
+    entry_data[CALIBRATION_EXPORT_REFUSED_KEY] = False
+    return was_set
 
 
 def dispatch_calibration_state(hass: Any, entry_id: str) -> None:

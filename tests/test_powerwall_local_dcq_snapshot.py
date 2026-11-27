@@ -1576,3 +1576,127 @@ async def test_legacy_dcq_is_reused_when_pw3_components_are_unavailable(monkeypa
         assert client.get_pw3_components.await_count == (powerwall_version == "pw3")
     finally:
         await coord.async_shutdown()
+
+
+def _refused_discharge_snapshot(**changes):
+    """Owner site 2026-11-27 20:05: force discharge accepted, battery held."""
+    snap = _calibration_snapshot(True, _LINGERING_REQUEST_ALERTS)
+    snap.soc = 77.0
+    snap.battery_w = -180.0
+    snap.grid_w = 2500.0
+    snap.load_w = 2320.0
+    snap.backup_reserve_percent = 5
+    snap.operation_mode = "autonomous"
+    for key, value in changes.items():
+        setattr(snap, key, value)
+    return snap
+
+
+def _confirm_export_refusal(coord, entry_data, snap):
+    import time
+
+    asyncio.run(coord._sync_calibration_alert(snap))
+    if calibration_mod.CALIBRATION_EXPORT_REFUSED_SINCE_KEY in entry_data:
+        entry_data[calibration_mod.CALIBRATION_EXPORT_REFUSED_SINCE_KEY] = (
+            time.monotonic() - calibration_mod.CALIBRATION_TAKEOVER_CONFIRM_SECONDS - 1
+        )
+    asyncio.run(coord._sync_calibration_alert(snap))
+
+
+def _export_refusal_coordinator(force_state):
+    replans: list[bool] = []
+    entry_data: dict = {
+        "force_discharge_state": force_state,
+        "optimization_coordinator": SimpleNamespace(
+            _schedule_settings_reoptimization=lambda: replans.append(True)
+        ),
+    }
+    coord, notifications = _calibration_coordinator(entry_data)
+    return coord, entry_data, notifications, replans
+
+
+def test_refused_force_discharge_latches_export_only_protection():
+    coord, entry_data, notifications, replans = _export_refusal_coordinator(
+        {"active": True, "source": "optimizer"}
+    )
+
+    # One poll only starts the confirmation window.
+    asyncio.run(coord._sync_calibration_alert(_refused_discharge_snapshot()))
+    assert not entry_data.get("calibration_export_refused")
+
+    _confirm_export_refusal(coord, entry_data, _refused_discharge_snapshot())
+    assert entry_data["calibration_export_refused"] is True
+    assert replans == [True]
+    # Charging still works on this gateway, so the full pause stays off.
+    assert not entry_data.get("calibration_suspected")
+    assert notifications == []
+
+    # The latch survives PowerSync releasing its refused force discharge.
+    entry_data["force_discharge_state"] = {"active": False}
+    asyncio.run(coord._sync_calibration_alert(
+        _refused_discharge_snapshot(battery_w=2300.0, grid_w=0.0)
+    ))
+    assert entry_data["calibration_export_refused"] is True
+
+
+def test_export_refusal_clears_when_calibration_request_clears():
+    coord, entry_data, _notifications, replans = _export_refusal_coordinator(
+        {"active": True}
+    )
+    _confirm_export_refusal(coord, entry_data, _refused_discharge_snapshot())
+    assert entry_data["calibration_export_refused"] is True
+    asyncio.run(coord._sync_calibration_alert(_refused_discharge_snapshot(alerts=[])))
+    assert entry_data["calibration_export_refused"] is False
+    assert replans == [True, True]
+
+
+def test_export_refusal_ends_after_drain_and_refill_cycle():
+    coord, entry_data, _notifications, _replans = _export_refusal_coordinator(
+        {"active": True}
+    )
+    _confirm_export_refusal(coord, entry_data, _refused_discharge_snapshot())
+    entry_data["force_discharge_state"] = {"active": False}
+    for soc in (40.0, 15.0, 60.0, 98.5):
+        asyncio.run(coord._sync_calibration_alert(
+            _refused_discharge_snapshot(soc=soc, battery_w=1000.0, grid_w=0.0)
+        ))
+    assert entry_data["calibration_export_refused"] is False
+
+
+def test_refresh_calibration_clears_export_refusal_until_request_clears():
+    coord, entry_data, _notifications, _replans = _export_refusal_coordinator(
+        {"active": True}
+    )
+    _confirm_export_refusal(coord, entry_data, _refused_discharge_snapshot())
+    calibration_mod.clear_calibration_sources(entry_data)
+    assert entry_data["calibration_export_refused"] is False
+    # Acknowledged: the lingering request does not re-latch immediately.
+    _confirm_export_refusal(coord, entry_data, _refused_discharge_snapshot())
+    assert entry_data["calibration_export_refused"] is False
+
+
+@pytest.mark.parametrize(
+    "force_state, changes",
+    [
+        ({"active": True}, {"battery_w": 2300.0, "grid_w": 0.0}),
+        ({"active": True}, {"battery_w": 9000.0, "grid_w": -6700.0}),
+        ({"active": True}, {"grid_w": 300.0}),
+        ({"active": True}, {"soc": 15.0}),
+        ({"active": True}, {"soc": 30.0, "backup_reserve_percent": 25}),
+        ({"active": True, "power_w": 500}, {}),
+        ({"active": True}, {"grid_status": "SystemIslandedActive"}),
+        ({"active": True}, {"alerts": []}),
+        ({"active": True}, {"alerts": [{"name": "BatteryCalibration"}]}),
+        ({"active": False}, {}),
+    ],
+    ids=[
+        "covering_load", "exporting", "small_import", "low_soc", "at_reserve",
+        "small_discharge_target", "islanded", "no_calibration_request",
+        "battery_calibration_already_pauses", "no_force_discharge",
+    ],
+)
+def test_force_discharge_is_not_refusal_when_behaviour_is_expected(force_state, changes):
+    coord, entry_data, _notifications, replans = _export_refusal_coordinator(force_state)
+    _confirm_export_refusal(coord, entry_data, _refused_discharge_snapshot(**changes))
+    assert not entry_data.get("calibration_export_refused")
+    assert replans == []
