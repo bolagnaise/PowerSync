@@ -4211,3 +4211,67 @@ def test_epex_missing_raw_export_is_not_displayed_as_a_measured_zero(opt_module)
     imports, exports = asyncio.run(coordinator._get_price_forecast())
     assert imports and exports == [0] * 12
     assert coordinator._last_display_export_prices == []
+
+
+def _t191_import_cents(slot_30: int) -> float:
+    """Daily shape: 41c evening, 29c overnight, 43c morning, 10c midday."""
+    hour = (22.5 + slot_30 / 2) % 24  # forecast starts at 22:30 local
+    if 6 <= hour < 9:
+        return 43.0
+    if 9 <= hour < 16:
+        return 10.0
+    if 16 <= hour < 24:
+        return 42.7
+    return 29.0
+
+
+@pytest.mark.parametrize("provider", ["amber", "octopus"])
+def test_price_tail_past_forecast_repeats_previous_day(opt_module, monkeypatch, provider):
+    """Ticket #191: unpublished hours must not all inherit the final peak price."""
+    now = datetime(2026, 11, 26, 12, 20, tzinfo=timezone.utc)
+    start = now.replace(minute=0)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    current = [
+        _dynamic_price_entry(start, _t191_import_cents(0), "general", interval_type="CurrentInterval",
+                             advanced_price={"predicted": _t191_import_cents(0)}),
+        _dynamic_price_entry(start, 12.0, "feedIn", interval_type="CurrentInterval",
+                             advanced_price={"predicted": -12.0}),
+    ]
+    forecast = list(current)
+    for k in range(1, 49):  # 24.5 h of half-hour prices, ending on the evening peak
+        slot_start = start + timedelta(minutes=30 * k)
+        cents = _t191_import_cents(k)
+        feed_in = 13.5 if cents > 40 else 5.0
+        forecast.append(_dynamic_price_entry(slot_start, cents, "general", advanced_price={"predicted": cents}))
+        forecast.append(_dynamic_price_entry(slot_start, feed_in, "feedIn", advanced_price={"predicted": -feed_in}))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module, provider, forecast, current=current, horizon_hours=48,
+    )
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+
+    assert len(imports) == len(exports) == 576
+    valid = coordinator._last_optimizer_price_valid_slots
+    real = sum(valid)
+    assert 288 <= real < 576
+    assert valid == [True] * real + [False] * (576 - real)
+    # Every unpublished slot is the price from exactly one day earlier.
+    for index in range(real, 576):
+        assert imports[index] == pytest.approx(imports[index - 288])
+        assert exports[index] == pytest.approx(exports[index - 288])
+    tail = imports[real:]
+    assert min(tail) == pytest.approx(0.10)
+    assert max(tail) == pytest.approx(0.43)
+    # The chart and settlement arrays keep only the real prices / same tail.
+    assert len(coordinator._last_display_import_prices) == real
+    assert coordinator._last_settlement_import_prices == pytest.approx(imports)
+
+
+def test_price_tail_daily_fill_keeps_carry_for_short_forecasts(opt_module):
+    fill = opt_module.OptimizationCoordinator._fill_price_gaps_daily_tail
+    short = [0.3] * 100 + [None] * 476
+    assert fill(short, 288) == pytest.approx([0.3] * 576)
+    day = [0.1] * 144 + [0.4] * 150 + [None] * 282
+    filled = fill(day, 288)
+    assert filled[:294] == pytest.approx(day[:294])
+    assert filled[294:] == pytest.approx(filled[6:288])
+    assert fill([None] * 10, 288) == []

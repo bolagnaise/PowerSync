@@ -17228,6 +17228,42 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             filled.append(last)
         return filled
 
+    @classmethod
+    def _fill_price_gaps_daily_tail(
+        cls,
+        values: list[float | None],
+        slots_per_day: int,
+        default: float | None = None,
+    ) -> list[float]:
+        """Fill gaps, then extend the tail past the forecast from 24 h earlier.
+
+        Dynamic providers publish roughly a day of prices, but the LP plans
+        48 hours.  Carrying the final forecast price across the rest of the
+        horizon made a single evening-peak price the value of every later
+        hour, including overnight and midday.  The planner then held stored
+        energy for those synthetic peak slots while importing at real peak
+        prices.  Repeating the daily shape is a better estimate of the
+        unpublished hours.  The slots stay outside the provider price mask.
+
+        A forecast shorter than half a day says too little about the daily
+        shape, so it keeps the plain carry-forward, as do tail slots with no
+        price exactly a day earlier.  Discord #191.
+        """
+        filled = cls._fill_price_gaps(values, default)
+        last_real = max(
+            (index for index, value in enumerate(values) if value is not None),
+            default=None,
+        )
+        if last_real is None or slots_per_day <= 0:
+            return filled
+        if last_real + 1 < slots_per_day // 2:
+            return filled
+        for index in range(last_real + 1, len(filled)):
+            source = index - slots_per_day
+            if source >= 0:
+                filled[index] = filled[source]
+        return filled
+
     @staticmethod
     def _dynamic_import_price_dollar(
         entry: dict,
@@ -18086,7 +18122,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # A later known price cannot authorize dispatch while
                         # the current native retail interval is missing.
                         return None
-                    import_prices = self._fill_price_gaps(import_slots)
+                    slots_per_day = max(1, (24 * 60) // max(1, interval))
+                    import_prices = self._fill_price_gaps_daily_tail(
+                        import_slots, slots_per_day
+                    )
 
                     export_slots: list[float | None] = [None] * n_steps
                     display_export_slots: list[float | None] = [None] * n_steps
@@ -18148,9 +18187,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             previous_display = display_export_slots[pos]
                             display_export_slots[pos] = min(previous_display, display_price) if _provider == "octopus" and previous_display is not None else display_price
 
-                    export_prices = self._fill_price_gaps(export_slots)
-                    display_export_raw = self._fill_price_gaps(
+                    export_prices = self._fill_price_gaps_daily_tail(
+                        export_slots, slots_per_day
+                    )
+                    display_export_raw = self._fill_price_gaps_daily_tail(
                         display_export_slots,
+                        slots_per_day,
                         export_prices[0] if export_prices else None,
                     )
 
@@ -18268,7 +18310,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 )
                                 confidence_used = confidence_diagnostics["used"]
                                 if confidence_used:
-                                    export_prices = self._fill_price_gaps(weighted_slots)
+                                    export_prices = self._fill_price_gaps_daily_tail(
+                                        weighted_slots, slots_per_day
+                                    )
                             else:
                                 confidence_diagnostics = {"used": False, "reason": "custom_export_source"}
                             self._pending_amber_forecast_confidence = {
