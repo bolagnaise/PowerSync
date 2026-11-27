@@ -109,6 +109,17 @@ class ChargingSession:
     # Timestamp of last reading for elapsed time calculation
     last_reading_time: Optional[str] = None
 
+    # Vehicle attribution for charger-metered sessions.  ``vehicle_id`` stays
+    # the active-session key (``ocpp_<charger>`` for OCPP); these record which
+    # car the energy belongs to.  ``id_tag_last4`` never holds the full tag.
+    charger_id: Optional[str] = None
+    attributed_vehicle_id: Optional[str] = None
+    attribution_source: Optional[str] = None
+    id_tag_last4: Optional[str] = None
+    # Set on a PowerSync-owned session whose energy is metered by a separate
+    # charger-poll session (e.g. a Tesla profile on an OCPP charger).
+    metered_by_session_id: Optional[str] = None
+
     # Running totals for segment tracking
     _current_segment_start: Optional[str] = field(default=None, repr=False)
     _current_segment_source: Optional[str] = field(default=None, repr=False)
@@ -136,6 +147,12 @@ class ChargingSession:
             "completed": self.completed,
             "stopped_reason": self.stopped_reason,
             "last_reading_time": self.last_reading_time,
+            "charger_id": self.charger_id,
+            "attributed_vehicle_id": self.attributed_vehicle_id,
+            "attribution_source": self.attribution_source,
+            "id_tag_last4": self.id_tag_last4,
+            "metered_by_session_id": self.metered_by_session_id,
+            "effective_vehicle_id": self.effective_vehicle_id,
             "segments": [s.to_dict() if isinstance(s, ChargingSegment) else s for s in self.segments],
         }
         return data
@@ -167,8 +184,47 @@ class ChargingSession:
             completed=data.get("completed", False),
             stopped_reason=data.get("stopped_reason"),
             last_reading_time=data.get("last_reading_time"),
+            charger_id=data.get("charger_id"),
+            attributed_vehicle_id=data.get("attributed_vehicle_id"),
+            attribution_source=data.get("attribution_source"),
+            id_tag_last4=data.get("id_tag_last4"),
+            metered_by_session_id=data.get("metered_by_session_id"),
             segments=segments,
         )
+
+    @property
+    def effective_vehicle_id(self) -> str:
+        """Return the vehicle this session's energy belongs to.
+
+        A charger-metered session that no source could attribute reports
+        ``"unassigned"`` rather than the charger key, so per-vehicle totals
+        never present a charger as a car.
+        """
+        if self.attributed_vehicle_id:
+            return self.attributed_vehicle_id
+        if self.charger_id and self.attribution_source:
+            return "unassigned"
+        return self.vehicle_id
+
+    def set_attribution(
+        self,
+        vehicle_id: Optional[str],
+        source: str,
+        id_tag_last4: Optional[str] = None,
+    ) -> bool:
+        """Apply attribution unless a final source already owns the session."""
+        if self.attribution_source in ("rfid", "manual") and source not in ("manual",):
+            return False
+        changed = (
+            self.attributed_vehicle_id != vehicle_id
+            or self.attribution_source != source
+            or (id_tag_last4 and self.id_tag_last4 != id_tag_last4)
+        )
+        self.attributed_vehicle_id = vehicle_id
+        self.attribution_source = source
+        if id_tag_last4:
+            self.id_tag_last4 = id_tag_last4
+        return bool(changed)
 
     @property
     def duration_minutes(self) -> float:
@@ -396,6 +452,10 @@ class ChargingSessionManager:
         *,
         session_id: Optional[str] = None,
         still_current: Optional[Callable[[], bool]] = None,
+        charger_id: Optional[str] = None,
+        attributed_vehicle_id: Optional[str] = None,
+        attribution_source: Optional[str] = None,
+        id_tag_last4: Optional[str] = None,
     ) -> Optional[ChargingSession]:
         """Start a new charging session.
 
@@ -427,6 +487,10 @@ class ChargingSessionManager:
                 mode=mode,
                 start_soc=start_soc,
                 target_soc=target_soc,
+                charger_id=charger_id,
+                attributed_vehicle_id=attributed_vehicle_id,
+                attribution_source=attribution_source,
+                id_tag_last4=id_tag_last4,
             )
 
             self.active_sessions[vehicle_id] = session
@@ -605,7 +669,12 @@ class ChargingSessionManager:
         sessions = [
             s for s in self._sessions_cache
             if s.completed and s.start_time >= cutoff_str
-            and (vehicle_id is None or s.vehicle_id == vehicle_id)
+            and not _is_metered_elsewhere(s)
+            and (
+                vehicle_id is None
+                or s.effective_vehicle_id == vehicle_id
+                or s.vehicle_id == vehicle_id
+            )
         ]
 
         # Sort by start time, newest first
@@ -643,6 +712,7 @@ class ChargingSessionManager:
                 "avg_session_duration_minutes": 0,
                 "avg_session_energy_kwh": 0,
                 "by_vehicle": {},
+                "by_charger": {},
                 "by_day": [],
             }
 
@@ -653,28 +723,53 @@ class ChargingSessionManager:
         total_cost = sum(s.total_cost_cents for s in sessions)
         total_savings = sum(s.net_savings_cents for s in sessions)
 
-        # Calculate per-vehicle stats
+        # Calculate per-vehicle stats.  Charger-metered sessions group by the
+        # car they were attributed to, not the charger key.
         by_vehicle: Dict[str, dict] = {}
+        by_charger: Dict[str, dict] = {}
         for session in sessions:
-            vid = session.vehicle_id
-            if vid not in by_vehicle:
-                by_vehicle[vid] = {
-                    "sessions": 0,
-                    "energy_kwh": 0,
-                    "solar_energy_kwh": 0,
-                    "savings_dollars": 0,
-                }
-            by_vehicle[vid]["sessions"] += 1
-            by_vehicle[vid]["energy_kwh"] += session.total_energy_kwh
-            by_vehicle[vid]["solar_energy_kwh"] += session.solar_energy_kwh
-            by_vehicle[vid]["savings_dollars"] += session.net_savings_cents / 100
+            for key, bucket in (
+                (session.effective_vehicle_id, by_vehicle),
+                (session.charger_id, by_charger),
+            ):
+                if not key:
+                    continue
+                if key not in bucket:
+                    bucket[key] = {
+                        "sessions": 0,
+                        "energy_kwh": 0,
+                        "solar_energy_kwh": 0,
+                        "grid_energy_kwh": 0,
+                        "cost_cents": 0,
+                        "savings_dollars": 0,
+                    }
+                bucket[key]["sessions"] += 1
+                bucket[key]["energy_kwh"] += session.total_energy_kwh
+                bucket[key]["solar_energy_kwh"] += session.solar_energy_kwh
+                bucket[key]["grid_energy_kwh"] += session.grid_energy_kwh
+                bucket[key]["cost_cents"] += session.total_cost_cents
+                bucket[key]["savings_dollars"] += session.net_savings_cents / 100
 
-        # Add solar percentage to each vehicle
-        for vid, stats in by_vehicle.items():
-            if stats["energy_kwh"] > 0:
-                stats["solar_percentage"] = (stats["solar_energy_kwh"] / stats["energy_kwh"]) * 100
-            else:
-                stats["solar_percentage"] = 0
+        names = self._vehicle_display_names()
+        for bucket in (by_vehicle, by_charger):
+            for key, stats in bucket.items():
+                energy = stats["energy_kwh"]
+                cost_cents = stats.pop("cost_cents")
+                stats["solar_percentage"] = (
+                    (stats["solar_energy_kwh"] / energy) * 100 if energy > 0 else 0
+                )
+                stats["cost_dollars"] = round(cost_cents / 100, 2)
+                stats["avg_cost_per_kwh_cents"] = (
+                    round(cost_cents / energy, 1) if energy > 0 else 0
+                )
+                stats["energy_kwh"] = round(energy, 2)
+                stats["solar_energy_kwh"] = round(stats["solar_energy_kwh"], 2)
+                stats["grid_energy_kwh"] = round(stats["grid_energy_kwh"], 2)
+                stats["savings_dollars"] = round(stats["savings_dollars"], 2)
+        for key, stats in by_vehicle.items():
+            stats["display_name"] = (
+                "Unassigned" if key == "unassigned" else names.get(key, key)
+            )
 
         # Calculate daily totals
         by_day: Dict[str, dict] = {}
@@ -711,6 +806,7 @@ class ChargingSessionManager:
             "avg_session_duration_minutes": round(statistics.mean(durations) if durations else 0, 1),
             "avg_session_energy_kwh": round(statistics.mean(energies) if energies else 0, 2),
             "by_vehicle": by_vehicle,
+            "by_charger": by_charger,
             "by_day": daily_list,
             "environmental": {
                 "co2_avoided_kg": round(solar_energy * 0.5, 1),  # ~0.5kg CO2 per kWh from grid
@@ -720,6 +816,51 @@ class ChargingSessionManager:
                 "equivalent_petrol_dollars": round(self._calculate_petrol_equivalent(total_energy), 2),
             },
         }
+
+    def _vehicle_display_names(self) -> Dict[str, str]:
+        """Return configured vehicle names from the automation store."""
+        names: Dict[str, str] = {}
+        try:
+            from .ev_session_attribution import vehicle_display_names
+
+            for entry_data in (self.hass.data.get("power_sync") or {}).values():
+                store = entry_data.get("automation_store") if isinstance(entry_data, dict) else None
+                data = getattr(store, "_data", None)
+                if isinstance(data, dict):
+                    names.update(vehicle_display_names(data))
+        except Exception as err:  # pragma: no cover - names are cosmetic
+            _LOGGER.debug("Could not read vehicle names for charging stats: %s", err)
+        return names
+
+    async def reassign_session(
+        self,
+        session_id: str,
+        vehicle_id: Optional[str],
+    ) -> Optional[ChargingSession]:
+        """Manually attribute a session to a vehicle (``None`` unassigns)."""
+        async with self._session_lock:
+            await self._load_sessions()
+            target = next((s for s in self._sessions_cache if s.id == session_id), None)
+            active = next((s for s in self.active_sessions.values() if s.id == session_id), None)
+            session = target or active
+            if session is None:
+                return None
+            if vehicle_id:
+                session.set_attribution(vehicle_id, "manual")
+            else:
+                session.attributed_vehicle_id = None
+                session.attribution_source = "unassigned" if session.charger_id else None
+            if target is not None:
+                await self._save_sessions()
+            return session
+
+    async def mark_metered_by(self, vehicle_id: str, metering_session_id: str) -> bool:
+        """Mark an active PowerSync session as metered by a charger-poll session."""
+        session = self.active_sessions.get(vehicle_id)
+        if session is None or session.id == metering_session_id:
+            return False
+        session.metered_by_session_id = metering_session_id
+        return True
 
     def _calculate_petrol_equivalent(self, energy_kwh: float) -> float:
         """Calculate equivalent petrol cost for same distance.
@@ -732,6 +873,11 @@ class ChargingSessionManager:
         ev_km = energy_kwh * 6
         petrol_litres = ev_km / 12
         return petrol_litres * 2.0
+
+
+def _is_metered_elsewhere(session: ChargingSession) -> bool:
+    """Hide an empty owner session whose energy another session metered."""
+    return bool(session.metered_by_session_id) and session.total_energy_kwh <= 0
 
 
 # Global session manager instance (initialized by __init__.py)

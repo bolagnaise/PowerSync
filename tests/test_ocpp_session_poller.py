@@ -33,9 +33,10 @@ class _SessionManager:
         self.updates = []
         self.ended = []
 
-    async def start_session(self, vehicle_id, mode):
+    async def start_session(self, vehicle_id, mode, **kwargs):
         self.started.append((vehicle_id, mode))
-        self.active_sessions[vehicle_id] = SimpleNamespace(id="s1")
+        self.start_kwargs = kwargs
+        self.active_sessions[vehicle_id] = _session(vehicle_id, **kwargs)
 
     async def update_session(self, **kwargs):
         self.updates.append(kwargs)
@@ -45,7 +46,30 @@ class _SessionManager:
         self.active_sessions.pop(vehicle_id, None)
 
 
-def _poll(monkeypatch, states, sm, prices=(41.5, 6.0)):
+def _session(key, **kwargs):
+    from datetime import datetime, timezone
+
+    session = SimpleNamespace(
+        id=f"id-{key}", vehicle_id=key,
+        start_time=datetime.now(timezone.utc).isoformat(),
+        charger_id=kwargs.get("charger_id"),
+        attributed_vehicle_id=None,
+        attribution_source=kwargs.get("attribution_source"),
+        id_tag_last4=None,
+    )
+
+    def set_attribution(vehicle_id, source, last4=None):
+        session.attributed_vehicle_id = vehicle_id
+        session.attribution_source = source
+        if last4:
+            session.id_tag_last4 = last4
+        return True
+
+    session.set_attribution = set_attribution
+    return session
+
+
+def _poll(monkeypatch, states, sm, prices=(41.5, 6.0), store_data=None):
     ps = types.ModuleType("power_sync")
     ps.__path__ = [str(ROOT)]
     automations = types.ModuleType("power_sync.automations")
@@ -55,6 +79,13 @@ def _poll(monkeypatch, states, sm, prices=(41.5, 6.0)):
                  str(ROOT / "automations/ocpp_status.py"), "exec"), ocpp_status.__dict__)
     session_mod = types.ModuleType("power_sync.automations.ev_charging_session")
     session_mod.get_session_manager = lambda: sm
+
+    def _parse_aware(value):
+        from datetime import datetime
+
+        return datetime.fromisoformat(value)
+
+    session_mod._parse_aware = _parse_aware
     pricing = types.ModuleType("power_sync.automations.ev_pricing")
     price_calls = []
 
@@ -91,18 +122,28 @@ def _poll(monkeypatch, states, sm, prices=(41.5, 6.0)):
         ),
         "entry": SimpleNamespace(entry_id="entry-1"),
     }
+    from datetime import datetime, timezone
+
     state_objects = {
-        entity_id: SimpleNamespace(entity_id=entity_id, state=value, attributes=attrs)
+        entity_id: SimpleNamespace(entity_id=entity_id, state=value, attributes=attrs,
+                                   last_reported=datetime.now(timezone.utc))
         for entity_id, (value, attrs) in states.items()
     }
+    entry_data = {}
+    if store_data is not None:
+        entry_data["automation_store"] = SimpleNamespace(_data=store_data, async_save=_noop_save)
     namespace["hass"] = SimpleNamespace(
-        data={"power_sync": {"entry-1": {}}},
+        data={"power_sync": {"entry-1": entry_data}},
         states=SimpleNamespace(get=lambda entity_id: state_objects.get(entity_id)),
     )
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                  str(INIT), "exec"), namespace)
     asyncio.run(namespace["_poll_ocpp_sessions"]())
     return price_calls
+
+
+async def _noop_save():
+    return None
 
 
 @pytest.mark.parametrize(
@@ -116,7 +157,7 @@ def _poll(monkeypatch, states, sm, prices=(41.5, 6.0)):
 )
 def test_poller_records_charging_power_in_kw(monkeypatch, power_state, attrs, expected_kw):
     sm = _SessionManager()
-    sm.active_sessions["ocpp_wallbox"] = SimpleNamespace(id="s0")
+    sm.active_sessions["ocpp_wallbox"] = _session("ocpp_wallbox", charger_id="wallbox")
     _poll(monkeypatch, {
         "sensor.wallbox_status_connector": ("Charging", {}),
         "sensor.wallbox_current_power": (power_state, attrs),
@@ -146,7 +187,7 @@ def test_poller_uses_shared_ev_prices(monkeypatch):
 def test_kw_power_keeps_session_open_while_finishing(monkeypatch):
     """Power above 50 W in kW units must hold a Finishing session open."""
     sm = _SessionManager()
-    sm.active_sessions["ocpp_wallbox"] = SimpleNamespace(id="s0")
+    sm.active_sessions["ocpp_wallbox"] = _session("ocpp_wallbox", charger_id="wallbox")
     _poll(monkeypatch, {
         "sensor.wallbox_status_connector": ("Finishing", {}),
         "sensor.wallbox_current_power": ("1.4", {"unit_of_measurement": "kW"}),
@@ -178,3 +219,29 @@ def test_poller_does_not_run_before_session_manager_exists():
     manager = source.index("set_session_manager(session_manager)")
     assert "await _poll_ocpp_sessions()" not in source[start:manager]
     assert register < manager
+
+
+def test_poller_attributes_session_by_rfid_tag(monkeypatch):
+    import hashlib
+
+    tag = "04A1B2C3D4E5F6"
+    ref = hashlib.sha256(tag.encode()).hexdigest()
+    store_data = {
+        "vehicle_charging_configs": [
+            {"vehicle_id": "VIN_A", "charger_type": "ocpp", "ocpp_charger_id": "wallbox"},
+            {"vehicle_id": "VIN_B", "charger_type": "ocpp", "ocpp_charger_id": "wallbox"},
+        ],
+        "rfid_tags": {ref: {"vehicle_id": "VIN_B", "last4": "E5F6"}},
+    }
+    sm = _SessionManager()
+    _poll(monkeypatch, {
+        "sensor.wallbox_status_connector": ("Charging", {}),
+        "sensor.wallbox_current_power": ("7.2", {"unit_of_measurement": "kW"}),
+        "sensor.wallbox_id_tag": (tag, {}),
+    }, sm, store_data=store_data)
+
+    assert sm.start_kwargs == {"charger_id": "wallbox", "attribution_source": "unassigned"}
+    session = sm.active_sessions["ocpp_wallbox"]
+    assert (session.attributed_vehicle_id, session.attribution_source) == ("VIN_B", "rfid")
+    assert session.id_tag_last4 == "E5F6"
+    assert sm.updates[0]["power_kw"] == pytest.approx(7.2)

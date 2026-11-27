@@ -20279,7 +20279,9 @@ class VehicleChargingConfigView(HomeAssistantView):
 
             store._data["vehicle_charging_configs"] = updated
             from .automations.ev_loadpoint_profiles import prune_connected_ev_selections
+            from .automations.ev_session_attribution import remove_vehicle_tags
             prune_connected_ev_selections(store._data)
+            remove_vehicle_tags(store._data, vehicle_id)
             for key in ("auto_schedule_settings", "cached_vehicle_soc"):
                 value = store._data.get(key)
                 if isinstance(value, dict):
@@ -20454,7 +20456,11 @@ class ChargingSessionsView(HomeAssistantView):
             # Also include any active sessions
             active_sessions = []
             for vid, session in manager.active_sessions.items():
-                if vehicle_id is None or vid == vehicle_id:
+                if (
+                    vehicle_id is None
+                    or vid == vehicle_id
+                    or session.effective_vehicle_id == vehicle_id
+                ):
                     active_sessions.append({
                         **session.to_dict(),
                         "is_active": True,
@@ -20515,6 +20521,7 @@ class ChargingStatisticsView(HomeAssistantView):
                         "avg_session_duration_minutes": 0,
                         "avg_session_energy_kwh": 0,
                         "by_vehicle": {},
+                        "by_charger": {},
                         "by_day": [],
                     },
                     "message": "Session tracking not initialized"
@@ -20539,6 +20546,122 @@ class ChargingStatisticsView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+
+
+class EVRFIDTagsView(HomeAssistantView):
+    """Map OCPP RFID tags to vehicles for per-vehicle charging history.
+
+    Raw tags are never returned or accepted: clients assign a ``tag_ref``
+    (a SHA-256 of the tag) taken from the recently presented tags list.
+    """
+
+    url = "/api/power_sync/ev/rfid_tags"
+    name = "api:power_sync:ev:rfid_tags"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        self._hass = hass
+        self._config_entry = entry
+
+    def _store(self):
+        entry_data = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+        store = entry_data.get("automation_store") if isinstance(entry_data, dict) else None
+        if store is None or not isinstance(getattr(store, "_data", None), dict):
+            raise ValueError("Automation storage is unavailable.")
+        return store
+
+    async def get(self, request: web.Request) -> web.Response:
+        from .automations.ev_session_attribution import (
+            prune_recent_unmapped,
+            public_tag_listing,
+        )
+
+        try:
+            store = self._store()
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=503)
+        prune_recent_unmapped(store._data)
+        return web.json_response({"success": True, **public_tag_listing(store._data)})
+
+    async def post(self, request: web.Request) -> web.Response:
+        from .automations.ev_session_attribution import (
+            assign_tag,
+            public_tag_listing,
+            remove_tag,
+        )
+
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a JSON object.")
+            store = self._store()
+            action = str(payload.get("action") or "").strip().lower()
+            ref = str(payload.get("tag_ref") or "").strip().lower()
+            if not ref:
+                raise ValueError("tag_ref is required.")
+            if action == "assign":
+                assign_tag(store._data, ref, payload.get("vehicle_id"), payload.get("label"))
+            elif action == "remove":
+                if not remove_tag(store._data, ref):
+                    raise ValueError("tag_ref is not mapped.")
+            else:
+                raise ValueError("action must be 'assign' or 'remove'.")
+            await store.async_save()
+            return web.json_response({"success": True, **public_tag_listing(store._data)})
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=409)
+        except Exception:
+            _LOGGER.exception("Could not update RFID tag mapping")
+            return web.json_response(
+                {"success": False, "error": "RFID tag settings could not be saved."},
+                status=503,
+            )
+
+
+class ChargingSessionVehicleView(HomeAssistantView):
+    """Manually assign a charging session to a vehicle."""
+
+    url = "/api/power_sync/ev/sessions/{session_id}/vehicle"
+    name = "api:power_sync:ev:session_vehicle"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        self._hass = hass
+        self._config_entry = entry
+
+    async def post(self, request: web.Request, session_id: str) -> web.Response:
+        from .automations.ev_charging_session import get_session_manager
+        from .automations.ev_session_attribution import known_vehicle_ids
+
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a JSON object.")
+            vehicle_id = str(payload.get("vehicle_id") or "").strip() or None
+            entry_data = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
+            store = entry_data.get("automation_store") if isinstance(entry_data, dict) else None
+            data = getattr(store, "_data", None)
+            if vehicle_id and vehicle_id not in known_vehicle_ids(data if isinstance(data, dict) else {}):
+                raise ValueError("vehicle_id is not a configured vehicle.")
+            manager = get_session_manager()
+            if manager is None:
+                return web.json_response(
+                    {"success": False, "error": "Session tracking not initialized."},
+                    status=503,
+                )
+            session = await manager.reassign_session(session_id, vehicle_id)
+            if session is None:
+                return web.json_response(
+                    {"success": False, "error": "Session not found."}, status=404
+                )
+            return web.json_response({"success": True, "session": session.to_dict()})
+        except ValueError as err:
+            return web.json_response({"success": False, "error": str(err)}, status=409)
+        except Exception:
+            _LOGGER.exception("Could not reassign charging session")
+            return web.json_response(
+                {"success": False, "error": "Session could not be updated."}, status=503
+            )
 
 
 class ChargingScheduleView(HomeAssistantView):
@@ -48820,8 +48943,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     is_ocpp_charging,
                     ocpp_power_w,
                     should_end_ocpp_session,
+                    split_hacs_ocpp_connector_prefix,
                 )
                 from .automations.ev_pricing import get_current_ev_prices
+                from .automations.ev_session_attribution import (
+                    async_attribute_charger_session,
+                )
 
                 sm = get_session_manager()
                 if sm is None:
@@ -48829,8 +48956,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 entity_reg = _er.async_get(hass)
                 charger_entities = {}
+                tag_entities = {}
                 for reg_entry in entity_reg.entities.values():
                     if reg_entry.platform != "ocpp":
+                        continue
+                    if reg_entry.entity_id.lower().endswith("_id_tag"):
+                        tag_prefix = reg_entry.entity_id.lower().split(".", 1)[-1][: -len("_id_tag")]
+                        if tag_prefix:
+                            tag_entities[tag_prefix] = reg_entry.entity_id
                         continue
                     m = _OCPP_SUFFIXES.match(reg_entry.entity_id)
                     prefix = m.group(2) if m else extract_hacs_ocpp_prefix(reg_entry.entity_id)
@@ -48872,11 +49005,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # when no PowerSync-initiated session already exists for
                     # this charger).
                     if is_charging and not has_session:
-                        await sm.start_session(vehicle_id=vid, mode="ocpp")
+                        await sm.start_session(
+                            vehicle_id=vid,
+                            mode="ocpp",
+                            charger_id=cid,
+                            attribution_source="unassigned",
+                        )
                         _LOGGER.info(
                             "📊 OCPP %s: started session (status=%s)",
                             cid, status_state.state,
                         )
+
+                    # Attribute the session to a car: RFID tag, the selected
+                    # connected EV, or the only profile on this charger.
+                    if vid in sm.active_sessions:
+                        base_cid = split_hacs_ocpp_connector_prefix(cid)[0]
+                        tag_entity = tag_entities.get(cid) or tag_entities.get(base_cid)
+                        try:
+                            await async_attribute_charger_session(
+                                hass,
+                                entry.entry_id,
+                                sm,
+                                vid,
+                                cid,
+                                hass.states.get(tag_entity) if tag_entity else None,
+                            )
+                        except Exception as attr_err:
+                            # Attribution is bookkeeping; never let it stop
+                            # metering or ending the session.
+                            _LOGGER.debug("OCPP %s attribution failed: %s", cid, attr_err)
 
                     # Update active session with the latest power reading.
                     # Stop crediting power once the connector leaves "Charging"
@@ -48937,6 +49094,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(SolarSurplusConfigView(hass))
     hass.http.register_view(ChargingSessionsView(hass))
     hass.http.register_view(ChargingStatisticsView(hass))
+    hass.http.register_view(EVRFIDTagsView(hass, entry))
+    hass.http.register_view(ChargingSessionVehicleView(hass, entry))
     hass.http.register_view(ChargingScheduleView(hass))
     hass.http.register_view(SurplusForecastView(hass))
     hass.http.register_view(ChargingBoostView(hass, entry))

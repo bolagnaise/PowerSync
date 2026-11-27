@@ -126,7 +126,19 @@ class ObservedTeslaSessionTracker:
     @staticmethod
     def _has_other_active_session(manager, vehicle_id: str) -> bool:
         session = manager.active_sessions.get(vehicle_id)
-        return bool(session and getattr(session, "mode", None) not in OBSERVED_SESSION_MODES)
+        if session and getattr(session, "mode", None) not in OBSERVED_SESSION_MODES:
+            return True
+        # A charger-metered session (e.g. OCPP) already attributed to this
+        # car records the same energy; observing it too would double count.
+        for key, other in manager.active_sessions.items():
+            if key == vehicle_id or getattr(other, "mode", None) in OBSERVED_SESSION_MODES:
+                continue
+            if (
+                getattr(other, "attributed_vehicle_id", None) == vehicle_id
+                and getattr(other, "attribution_source", None) not in (None, "unassigned")
+            ):
+                return True
+        return False
 
     async def _mark_idle(
         self,

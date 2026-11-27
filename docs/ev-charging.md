@@ -4,6 +4,7 @@
 - [Tessie Price Level handoff](#tessie-price-level-handoff)
 - [Zaptec Price Level charging](#zaptec-price-level-charging)
 - [EV SoC sensors with OCPP](#ev-soc-sensors-with-ocpp)
+- [Charging cost per vehicle with OCPP RFID cards](#charging-cost-per-vehicle-with-ocpp-rfid-cards)
 - [Multiple vehicles on one generic charger](#shared-charger-vehicles)
 
 <a id="ev-charging-actions"></a>
@@ -75,6 +76,21 @@ In the integration's **EV Charging** options, set **EV battery SoC sensor** and,
 PowerSync prefers a valid SoC reported by that OCPP connector, then tries your primary sensor and finally the fallback. The resolved value feeds the EV display, Smart Schedule and target-SoC checks. Invalid or unavailable readings remain unknown; Smart Schedule waits for a usable SoC and requests a stop if its charging session loses that reading.
 
 The global sensor pair is not assigned automatically when multiple OCPP chargers or a separate generic charger are configured. Native per-connector SoC still works. For multiple cars sharing a generic charger, use the selected vehicle profiles below. See [EV SoC sources](ev-soc-sources.md) for source precedence and limitations.
+
+## Charging cost per vehicle with OCPP RFID cards
+
+An OCPP charger measures the energy it delivers, but it doesn't report which car is plugged in. The only identifier it sends is the RFID card or app tag used to start the charge. When several cars share one charger, PowerSync uses that card to work out which car each charging session belongs to, so EV charging history can show energy and cost for each car.
+
+PowerSync decides which car a session belongs to in this order:
+
+1. **RFID card.** The card that started the session is assigned to a car.
+2. **Selected EV.** You chose the connected car for this charger in the mobile app's shared-charger settings.
+3. **Only vehicle.** Only one vehicle profile uses this charger.
+4. **Unassigned.** Nothing identifies the car. The session still counts toward the charger's totals.
+
+To set it up, give each driver their own card and start one charge with each. Recently used cards appear in the mobile app under **EVs & Chargers → RFID cards**, shown by their last four characters. Assign each card to its car there. In **Charging history**, choose a car to see its own sessions, energy and cost, or long-press a session to change which car it belongs to.
+
+PowerSync only reads the card that started a session. It doesn't change which cards your charger accepts; manage that in the charger or the OCPP integration. Full card numbers are never stored or shown. Sessions started remotely by PowerSync or the OCPP integration carry no card, so they use the selected EV or the only vehicle instead. This requires chargers connected through the HACS OCPP integration.
 
 ## Tessie Price Level handoff
 

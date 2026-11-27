@@ -459,3 +459,16 @@ def test_generic_observation_does_not_claim_tesla_command_ownership():
     asyncio.run(tracker.poll())
 
     assert get_ev_ownership(hass, _Entry(), "generic_ev") == (None, None)
+
+
+def test_ocpp_session_attributed_to_vin_blocks_observed_duplicate():
+    """A Tesla charging on an OCPP charger is metered by the OCPP session only."""
+    from types import SimpleNamespace
+
+    other = SimpleNamespace(mode="ocpp", attributed_vehicle_id=VIN, attribution_source="rfid")
+    manager = SimpleNamespace(active_sessions={"ocpp_wallbox": other})
+    assert ObservedTeslaSessionTracker._has_other_active_session(manager, VIN) is True
+    assert ObservedTeslaSessionTracker._has_other_active_session(manager, VIN_2) is False
+
+    other.attribution_source = "unassigned"
+    assert ObservedTeslaSessionTracker._has_other_active_session(manager, VIN) is False
