@@ -2675,8 +2675,11 @@ class PriceForecaster:
                         if hourly_prices[hour_key]["import"] is None:
                             hourly_prices[hour_key]["import"] = per_kwh
                     elif channel == "feedIn":
+                        # Amber feedIn is negative when the site is paid to
+                        # export. PriceForecast.export_cents is the earning,
+                        # matching the other providers and the 8c fallback.
                         if hourly_prices[hour_key]["export"] is None:
-                            hourly_prices[hour_key]["export"] = per_kwh
+                            hourly_prices[hour_key]["export"] = -per_kwh
 
                 except Exception as e:
                     _LOGGER.debug(f"Error parsing forecast item: {e}")
