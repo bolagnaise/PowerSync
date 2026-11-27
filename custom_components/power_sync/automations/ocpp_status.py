@@ -138,6 +138,34 @@ def is_hacs_ocpp_energy_entity(entity_id: str) -> bool:
     return any(object_id.endswith(suffix) for suffix in OCPP_ENERGY_SUFFIXES)
 
 
+def ocpp_power_w(state: Any) -> float:
+    """Return a HACS OCPP power entity state in watts.
+
+    HACS OCPP converts charger ``W`` readings to ``kW`` before publishing
+    them, so the state must be scaled by its unit rather than read as watts.
+    Without a unit, values above 100 are treated as watts and smaller values
+    as kW, matching the other PowerSync EV power readers.
+    """
+    if state is None:
+        return 0.0
+    raw_state = getattr(state, "state", None)
+    if raw_state in (None, "unknown", "unavailable", "None"):
+        return 0.0
+    try:
+        value = float(raw_state)
+    except (TypeError, ValueError):
+        return 0.0
+    if value != value or value in (float("inf"), float("-inf")):
+        return 0.0
+    attributes = getattr(state, "attributes", None) or {}
+    unit = str(attributes.get("unit_of_measurement") or "").strip().lower()
+    if unit in ("w", "watt", "watts"):
+        return value
+    if unit in ("kw", "kilowatt", "kilowatts"):
+        return value * 1000
+    return value if abs(value) > 100 else value * 1000
+
+
 def is_ocpp_charging(status: Optional[str], power_w: float = 0.0) -> bool:
     """Return True when the connector is actively charging."""
     return normalize_ocpp_status(status) in OCPP_CHARGING_STATES or power_w > 50
