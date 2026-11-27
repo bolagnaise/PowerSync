@@ -22709,6 +22709,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                     is_ocpp_charging,
                     is_ocpp_vehicle_present,
                     normalize_ocpp_status,
+                    ocpp_power_w,
                 )
 
                 ent_reg = er_local.async_get(self._hass)
@@ -22754,11 +22755,11 @@ class EVLoadpointStatusView(HomeAssistantView):
                             charger["charging"] = is_ocpp_charging(state.state)
                     elif is_hacs_ocpp_power_entity(entity_id):
                         try:
-                            raw_power = float(state.state)
+                            float(state.state)
                         except (TypeError, ValueError):
                             continue
-                        power_kw = raw_power / 1000 if raw_power > 100 else raw_power
-                        power_w = raw_power if raw_power > 100 else raw_power * 1000
+                        power_w = ocpp_power_w(state)
+                        power_kw = power_w / 1000
                         charger["power_kw"] = power_kw
                         charger["connected"] = charger["connected"] or power_w > 50
                         charger["charging"] = charger["charging"] or power_w > 50
@@ -48663,8 +48664,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     is_hacs_ocpp_power_entity,
                     is_hacs_ocpp_status_entity,
                     is_ocpp_charging,
+                    ocpp_power_w,
                     should_end_ocpp_session,
                 )
+                from .automations.ev_pricing import get_current_ev_prices
 
                 sm = get_session_manager()
                 if sm is None:
@@ -48690,19 +48693,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 state_map: dict = ed.setdefault("ocpp_session_state", {})
 
-                # Pull current prices once for all chargers
-                import_price = 30.0
-                export_price = 8.0
-                amber_coord = ed.get("amber_coordinator")
-                if amber_coord and amber_coord.data:
-                    for p in amber_coord.data.get("current", []):
-                        if p.get("channelType") == "general":
-                            import_price = p.get("perKwh", 30.0)
-                        elif p.get("channelType") == "feedIn":
-                            export_price = abs(p.get("perKwh", 8.0))
-                elif ed.get("tariff_schedule"):
-                    import_price = ed["tariff_schedule"].get("buy_price", 30.0)
-                    export_price = ed["tariff_schedule"].get("sell_price", 8.0)
+                # Pull current prices once for all chargers, using the same
+                # provider/tariff resolution as every other EV session path.
+                import_price, export_price = get_current_ev_prices(hass, entry.entry_id)
 
                 for cid, entity_map in charger_entities.items():
                     vid = f"ocpp_{cid}"
@@ -48714,12 +48707,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     status_lower = status_state.state.lower()
 
                     power_state = hass.states.get(entity_map.get("power", ""))
-                    power_w = 0.0
-                    if power_state is not None and power_state.state not in ("unavailable", "unknown"):
-                        try:
-                            power_w = float(power_state.state)
-                        except (ValueError, TypeError):
-                            power_w = 0.0
+                    # HACS OCPP publishes power in kW; normalise to watts so
+                    # the session energy and the 50 W thresholds are correct.
+                    power_w = ocpp_power_w(power_state)
 
                     is_charging = is_ocpp_charging(status_lower, power_w)
                     has_session = vid in sm.active_sessions
@@ -48772,7 +48762,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("OCPP session poll error: %s", e)
 
         from homeassistant.helpers.event import async_track_time_interval as _track_ocpp_interval
-        await _poll_ocpp_sessions()
+        # No immediate poll: the session manager is created later in setup, so
+        # an immediate poll would find none (or, on reload, the replaced one).
         unsub_ocpp_poll = _track_ocpp_interval(
             hass, _poll_ocpp_sessions, timedelta(seconds=30)
         )
