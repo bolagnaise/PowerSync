@@ -742,7 +742,57 @@ def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
     assert forecast is not None
     assert forecast[0].hour == "2026-07-03T20:00:00"
     assert forecast[0].import_cents == 18.0
-    assert forecast[0].export_cents == 5.0
+    # Amber feedIn +5c means paying to export: a negative earning.
+    assert forecast[0].export_cents == -5.0
+
+
+def test_amber_forecast_export_cents_are_earnings_for_solar_ranking(monkeypatch):
+    """#463: Amber feedIn is negative when paid; Smart Schedule ranks earnings.
+
+    The raw sign made the hour that paid the most to export (9.5c) look like
+    the cheapest solar charge, moving the car's window to the next morning.
+    """
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 11, 25, 13, 50, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    rows = []
+    for hour, feed_in in (
+        ("2026-11-25T05:00:00Z", -2.5),  # 15:00 local, paid 2.5c
+        ("2026-11-25T22:00:00Z", -9.5),  # 08:00 next day, paid 9.5c
+    ):
+        rows.extend((
+            {"startTime": hour, "channelType": "general", "perKwh": 9.0},
+            {"startTime": hour, "channelType": "feedIn", "perKwh": feed_in},
+        ))
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={"forecast": rows}
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecast = asyncio.run(
+        ev_planner.PriceForecaster(hass, config_entry)._get_amber_forecast(24)
+    )
+
+    assert forecast is not None
+    assert [(row.hour, row.export_cents) for row in forecast] == [
+        ("2026-11-25T15:00:00", 2.5),
+        ("2026-11-26T08:00:00", 9.5),
+    ]
+    # The planner sorts solar options by this export opportunity cost.
+    assert min(forecast, key=lambda row: row.export_cents).hour == (
+        "2026-11-25T15:00:00"
+    )
 
 
 def test_amber_forecast_drops_past_hours_before_horizon_limit(monkeypatch):

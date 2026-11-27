@@ -1,8 +1,12 @@
 """An unconfirmed BLE command must not block a vehicle forever.
 
 Live: one lost readback (a 22:14 Stop, a 09:11 1 A rate) blocked every later
-command to that car indefinitely. The settled-attempt expiry retires such an
-attempt only once a fresh independent vehicle report shows its effect.
+command to that car indefinitely. Live 2026-11-27: a 6 A rate the car already
+had could never be read back and blocked a Smart Schedule start.
+
+A lost rate cannot start or stop charging, so it is retired at once without a
+cloud read. A Start or Stop is retired by the first fresh independent cloud
+report after a short settle window, whatever charging state it shows.
 """
 from __future__ import annotations
 
@@ -101,7 +105,6 @@ async def test_settled_stop_is_retired_and_the_vehicle_is_released(harness):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observed,expected", [
     (None, "no fresh independent vehicle reading"),
-    ("charging", "stop not observed"),
     ("old", "predates the settle window"),
 ])
 async def test_unproven_stop_stays_held(harness, observed, expected):
@@ -110,7 +113,6 @@ async def test_unproven_stop_stays_held(harness, observed, expected):
     before = deepcopy(runtime[recovery.RECOVERY_KEY])
     sample = {
         None: None,
-        "charging": _observation(VIN_A, stamp=time.time()),
         "old": _stopped(submitted + 60),
     }[observed]
 
@@ -142,20 +144,6 @@ async def test_cached_or_unattributed_reports_cannot_retire_a_stop(harness, weak
 
 
 @pytest.mark.asyncio
-async def test_rate_effect_needs_requested_current_provenance(harness):
-    hass, entry = harness
-    _seed(hass, entry, operation="rate", bound={"kind": "rate", "min_amps": 13, "max_amps": 13})
-    sample = _observation(VIN_A, stamp=time.time(), requested=13)
-    sample = replace(sample, field_provenance={
-        name: path for name, path in sample.field_provenance.items()
-        if name != "requested_current"})
-
-    retired, reason = await recovery.async_expire_settled_ble_attempts(hass, entry, VIN_A, sample)
-
-    assert not retired and "lacks field provenance" in reason
-
-
-@pytest.mark.asyncio
 async def test_attempt_inside_the_settle_window_stays_held(harness):
     hass, entry = harness
     _seed(hass, entry, age=60)
@@ -167,49 +155,57 @@ async def test_attempt_inside_the_settle_window_stays_held(harness):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested,charging,expect_retired", [
-    (13, True, True),     # the car already runs at the commanded rate
-    (16, True, False),    # a late 13 A write would still change a live session
-    (16, False, True),    # a late rate write cannot add draw to a stopped car
-])
-async def test_rate_attempt_needs_its_effect_or_a_stopped_car(harness, requested, charging, expect_retired):
+@pytest.mark.parametrize("operation", ["start", "stop"])
+async def test_settled_start_or_stop_is_retired_by_any_fresh_report(harness, operation):
+    """The settled report is the car's real state; control resumes from it."""
     hass, entry = harness
-    runtime, _ = _seed(hass, entry, operation="rate",
-                       bound={"kind": "rate", "min_amps": 13, "max_amps": 13})
-    sample = _observation(VIN_A, stamp=time.time(), requested=requested)
-    if not charging:
-        sample = replace(sample, charge_state="Stopped", charger_actual_current=0, charger_power=0)
-
-    retired, reason = await recovery.async_expire_settled_ble_attempts(hass, entry, VIN_A, sample)
-
-    assert retired is expect_retired, reason
-    assert bool(_attempt(runtime).get("recovery_retired")) is expect_retired
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("requested,expect_retired", [
-    (32, True),   # the request itself took effect
-    (16, True),   # the stale-entity-max fallback took effect
-    (20, False),  # neither possible write: a late write could still land
-])
-async def test_ranged_rate_attempt_needs_an_exact_possible_value(harness, requested, expect_retired):
-    hass, entry = harness
-    runtime, _ = _seed(hass, entry, operation="rate",
-                       bound={"kind": "rate", "min_amps": 16, "max_amps": 32})
+    runtime, _ = _seed(hass, entry, operation=operation)
 
     retired, reason = await recovery.async_expire_settled_ble_attempts(
-        hass, entry, VIN_A, _observation(VIN_A, stamp=time.time(), requested=requested))
+        hass, entry, VIN_A, _observation(VIN_A, stamp=time.time()))
 
-    assert retired is expect_retired, reason
-    if not expect_retired:
-        assert "not the command's 16A or 32A" in reason
-    assert bool(_attempt(runtime).get("recovery_retired")) is expect_retired
+    assert retired, reason
+    assert _attempt(runtime)["recovery_retired"]
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
 
 
 @pytest.mark.asyncio
-async def test_start_attempts_are_never_expired_automatically(harness):
+async def test_start_inside_the_settle_window_stays_held(harness):
     hass, entry = harness
-    _seed(hass, entry, operation="start")
+    _seed(hass, entry, operation="start", age=60)
+
+    retired, reason = await recovery.async_expire_settled_ble_attempts(
+        hass, entry, VIN_A, _observation(VIN_A, stamp=time.time()))
+
+    assert not retired and "settling" in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age", [0, 60])
+async def test_lost_rate_is_retired_at_once_without_a_report(harness, age):
+    """Live 2026-11-27: a 6 A write to a car already at 6 A was never read back.
+
+    Old or new amps, a rate write cannot start or stop charging, so it must
+    not hold the car until a cloud report arrives.
+    """
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry, operation="rate", age=age,
+                       bound={"kind": "rate", "min_amps": 6, "max_amps": 6})
+    assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
+    assert recovery.ble_attempt_expiry_needs_report(hass, entry, VIN_A) is False
+    assert recovery.ble_attempt_expiry_due(hass, entry, VIN_A)[0] <= time.time()
+
+    retired, reason = await recovery.async_expire_settled_ble_attempts(hass, entry, VIN_A, None)
+
+    assert retired, reason
+    assert _attempt(runtime)["recovery_retired"]
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_operations_are_never_expired_automatically(harness):
+    hass, entry = harness
+    _seed(hass, entry, operation="wake")
 
     retired, reason = await recovery.async_expire_settled_ble_attempts(
         hass, entry, VIN_A, _stopped(time.time()))
@@ -371,14 +367,29 @@ async def test_worker_reads_at_most_once_per_interval(harness, monkeypatch):
     worker, _ = _worker(hass, entry, runtime, monkeypatch, reads)
     observation = importlib.import_module("power_sync.tesla_ev_observation")
 
-    async def charging(_hass, vin, **kwargs):
+    async def stale(_hass, vin, **kwargs):
         reads.append(kwargs)
-        return _observation(VIN_A, stamp=time.time())
+        return _stopped(time.time() - SETTLE - 300)
 
-    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", charging)
+    monkeypatch.setattr(observation, "async_read_independent_tesla_vehicle", stale)
     await worker.async_tick()
     await worker.async_tick()
 
     assert len(reads) == 1
     assert recovery.get_vehicle_route(hass, entry, VIN_A)["reason"] == "ble_recovery"
     assert worker.held_logged[VIN_A][0] == "waiting before the next independent vehicle read"
+
+
+@pytest.mark.asyncio
+async def test_worker_retires_a_lost_rate_without_reading(harness, monkeypatch):
+    hass, entry = harness
+    runtime, _ = _seed(hass, entry, operation="rate", age=5,
+                       bound={"kind": "rate", "min_amps": 6, "max_amps": 6})
+    reads = []
+    worker, restarts = _worker(hass, entry, runtime, monkeypatch, reads)
+
+    await worker.async_tick()
+
+    assert reads == []
+    assert restarts == []
+    assert recovery.get_vehicle_route(hass, entry, VIN_A) is None

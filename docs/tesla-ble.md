@@ -208,7 +208,18 @@ journal and safety hold.
 
 The v2.12.1681 Pedro freshness/stop-recovery package supplies `sensor.<prefix>_current_limit_sample`. PowerSync can use its paired value and timestamp to confirm a current setting even when HA suppresses an identical update to the Charging amps number. The sample and Current limit sensor must retain their default entity IDs and belong to the same ESPHome device as Charging amps. Missing, stale, mismatched or rebound samples cannot confirm a command. This does not use actual charging power to infer a requested current setting.
 
-Update PowerSync through HACS and rebuild the existing Pedro bridge YAML using the v2.12.1681 package references. Preserve its identity, keys and pairing; do not install a build fixture. Updating HA alone does not add the sample. An existing retained command still needs the supported whole-inventory recovery action and its normal prerequisites; publication or a matching setting does not release it automatically. This addition does not apply to yoziru firmware.
+Update PowerSync through HACS and rebuild the existing Pedro bridge YAML using the v2.12.1681 package references. Preserve its identity, keys and pairing; do not install a build fixture. Updating HA alone does not add the sample. This addition does not apply to yoziru firmware.
+
+#### Automatic release of unconfirmed commands
+
+From v2.12.1864, PowerSync doesn't send a current setting the car already reports. If the car-reported Current limit and the Charging amps number already equal the target, and the bridge's Last update sensor changed within the last 2 minutes, PowerSync counts the setting as applied and sends nothing. Without a companion sample, HA suppresses the unchanged value, so a repeated write could never be confirmed.
+
+An unconfirmed command no longer holds the car indefinitely on its own:
+
+- **Current setting:** retired within about a minute, without a cloud read. Whether it landed or not, the car charges at its previous or new current, and the next setting replaces it.
+- **Start or Stop:** after a 3-minute settle window, the first fresh charge-state report from the Tesla cloud retires it, whatever charging state it shows. Control then resumes from that state. PowerSync reads the cloud at most every 5 minutes while waiting, never wakes the car, and never requests a paid refresh.
+
+A bridge quarantine, non-BLE uncertainty or an incident that covers another vehicle still needs the supported whole-inventory recovery action below.
 
 ### Inspect a hold without commands
 
