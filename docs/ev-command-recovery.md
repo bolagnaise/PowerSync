@@ -93,7 +93,7 @@ Merge these substitutions with your existing ones:
 
 ```yaml
 substitutions:
-  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1869
+  tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1870
   BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
   # Highest current Home Assistant may request. The car applies the charger's
   # real limit, which PowerSync reads from Charge current request max.
@@ -110,12 +110,12 @@ packages:
       - packages/client.yml
   powersync_stop_recovery:
     url: https://github.com/bolagnaise/PowerSync/
-    ref: v2.12.1869
+    ref: v2.12.1870
     files:
       - esphome/stop-recovery.yaml
 ```
 
-From v2.12.1869 the companion publishes `sensor.<prefix>_charge_current_request_max`, the highest current the car accepts from the connected charger (the Tesla app's charging-current maximum). PowerSync uses it as the BLE charger limit. Set `charging_amps_max` to `"48"` as shown: it only bounds what Home Assistant may request, and a lower value caps every BLE charging mode. A bridge built with 15 A, for example, never charges above 15 A on a 32 A charger.
+From v2.12.1870 the companion publishes `sensor.<prefix>_charge_current_request_max`, the highest current the car accepts from the connected charger (the Tesla app's charging-current maximum). PowerSync uses it as the BLE charger limit. Set `charging_amps_max` to `"48"` as shown: it only bounds what Home Assistant may request, and a lower value caps every BLE charging mode. A bridge built with 15 A, for example, never charges above 15 A on a 32 A charger.
 
 The v2.12.1652 recovery package also includes native charging receipt and paired-value entities automatically; do not add a second freshness package. See [BLE reliability](tesla-ble.md#tesla-ble-reliability) for firmware-family compatibility, the matching yoziru recovery adapter, and the operational recovery policy.
 
