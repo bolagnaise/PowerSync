@@ -12596,10 +12596,16 @@ class PriceLevelChargingExecutor:
                     decision = (False, "Multiple unresolved Zaptec command profiles; cancelling before restart", "")
                 results[target] = await self._evaluate_zaptec_loadpoint(target, decision)
                 if len(tracked) > 1:
+                    zaptec_charge_state = self._zaptec_cached_charge_state()
                     await self.apply_preserve_home_battery(
-                        any(self._vehicle_states[vin].start_pending or self._vehicle_states[vin].stop_pending
-                            or (self._vehicle_states[vin].is_charging and self._zaptec_cached_charge_state() is not False)
-                            for vin in tracked), decision[1],
+                        any(
+                            self._zaptec_preserve_needed(
+                                self._vehicle_states[vin], zaptec_charge_state,
+                                stopping=True,
+                            )
+                            for vin in tracked
+                        ),
+                        decision[1],
                     )
                 return results
 
@@ -12858,12 +12864,13 @@ class PriceLevelChargingExecutor:
                 vehicle_state.last_decision_reason = reason
 
         zaptec_charge_state = self._zaptec_cached_charge_state()
+        zaptec_ids = set(zaptec_vins) | set(self._tracked_zaptec_vehicle_ids())
         any_price_level_charging = any(
             self._zaptec_preserve_needed(
                 state, zaptec_charge_state,
                 stopping=not (results.get(vin) or (True,))[0],
             )
-            if vin in zaptec_vins
+            if vin in zaptec_ids
             else state.start_pending or state.stop_pending or state.is_charging
             for vin, state in self._vehicle_states.items()
         )

@@ -12300,3 +12300,43 @@ def test_zaptec_alias_owner_does_not_pin_hold_for_idle_stopped_charger(monkeypat
     runtime["zaptec_cached_state"]["total_charge_power_w"] = 7400
     asyncio.run(executor.evaluate_all_vehicles(31.4))
     assert runtime["scheduled_ev_preserve_state"]["active"] is True
+
+
+def test_multiple_tracked_zaptec_profiles_release_hold_for_idle_charger(monkeypatch):
+    """Ticket #186 variant: unresolved Zaptec profiles cancel without pinning
+    no_discharge while the charger reports 'charging' at 0 W."""
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
+        "zaptec_charger_id": "charger-1",
+    })
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["zaptec_cached_state"] = {
+        "charger_operation_mode": "charging", "total_charge_power_w": 0,
+        "phase_a_current": 0, "phase_b_current": 0, "phase_c_current": 0,
+    }
+    runtime["automation_store"]._data["vehicle_charging_configs"] = [
+        {"vehicle_id": VIN, "charger_type": "zaptec"},
+    ]
+    clock = [500.0]
+    monkeypatch.setattr(ev_planner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    for vin in (VIN, "zaptec_standalone"):
+        state = executor._get_or_create_vehicle_state(vin)
+        state.is_charging = state.zaptec_owned = True
+    assert len(executor._tracked_zaptec_vehicle_ids()) == 2
+    executor._set_preserve_home_battery_intent("Cheap price")
+    executor.get_charging_decision = AsyncMock(return_value=(False, "Price above threshold", ""))
+
+    holds = []
+    for _ in range(5):
+        clock[0] += 60
+        runtime["zaptec_state_poll"] = {"started_at": clock[0] - 1, "completed_at": clock[0]}
+        asyncio.run(executor.evaluate_all_vehicles(31.4))
+        holds.append(runtime["scheduled_ev_preserve_state"]["active"])
+
+    assert stop.await_count >= 1
+    assert not any(holds)
