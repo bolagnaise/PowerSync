@@ -52104,6 +52104,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .tesla_ev_auto_recovery import start as _start_ev_auto_recovery
     _start_ev_auto_recovery(hass, entry)
 
+    from .tesla_ble_bridge_health import start as _start_ble_bridge_health
+    _start_ble_bridge_health(hass, entry)
+
     _LOGGER.info("=" * 60)
     # Optional diagnostics must never make successful energy setup fail.
     try:
