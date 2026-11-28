@@ -4162,13 +4162,14 @@ def test_display_snapshot_keeps_unknown_ev_power_out_of_surplus_arithmetic(
         [],
         entry_data={
             "tesla_coordinator": SimpleNamespace(
+                last_update_success=True,
                 data={
                     "solar_power": 4.9,
                     "grid_power": -0.1,
                     "battery_power": 0.0,
                     "load_power": None,
                     "battery_level": 50,
-                }
+                },
             )
         },
     )
