@@ -18962,6 +18962,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 status = decision.to_dict()
                 status["location"] = location
                 status["vin"] = vin
+                status["entry_id"] = self._entry.entry_id
                 if telemetry.soc is not None:
                     status["soc"] = telemetry.soc
                 if override is not None:
