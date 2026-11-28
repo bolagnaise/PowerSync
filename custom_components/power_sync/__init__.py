@@ -19844,6 +19844,12 @@ class VehicleChargingConfigView(HomeAssistantView):
                 stable_id.startswith(("ble_", "byd_"))
                 or (len(stable_id) == 17 and stable_id.isalnum())
             )
+            if "return_prompt_threshold" in data:
+                from .optimization.ev_return_prompt import normalize_threshold
+
+                data["return_prompt_threshold"] = normalize_threshold(
+                    data["return_prompt_threshold"]
+                )
             capacity_changed = "battery_capacity_kwh" in data
             if "battery_capacity_kwh" in data:
                 try:

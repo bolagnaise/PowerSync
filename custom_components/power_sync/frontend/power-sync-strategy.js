@@ -5216,7 +5216,28 @@ const EV_PANEL_PATHS = {
   vehicleConfig: 'power_sync/ev/vehicle_config',
   vehicles: 'power_sync/ev/vehicles',
   boost: 'power_sync/ev/boost',
+  optimization: 'power_sync/optimization',
 };
+
+const EV_RETURN_SUMMARY = {
+  owner_not_home: 'You said it is not home tonight. No home charging is planned.',
+  owner_home_at: 'Planned from the time you gave.',
+  owner_home_at_overdue: 'Your arrival time passed, so no home charging is planned until it arrives.',
+  navigation: 'Navigating home. Charging is planned from its arrival time.',
+  range_shortfall: 'Not enough range to get home, so it will charge on the way.',
+  learned: 'Planned from its usual return time.',
+  no_return_evidence: 'No sign it is coming home, so no home charging is planned until it arrives.',
+};
+
+function evReturnThreshold(value) {
+  const n = Number(value);
+  if (value === undefined || value === null || value === '' || !Number.isFinite(n)) return 1;
+  return Math.round(Math.min(10, Math.max(0, n)) * 2) / 2;
+}
+
+function evReturnThresholdLabel(value) {
+  return value <= 0 ? 'Never ask' : `$${value.toFixed(2)}`;
+}
 
 const EV_MANUAL_SOURCE_HELP = {
   solar_only: 'Solar Only: charges from spare solar. It pauses when solar drops instead of using the grid.',
@@ -5439,7 +5460,7 @@ class PowerSyncEVPanel extends HTMLElement {
       throw new Error(status.error || 'EV status API unavailable');
     }
 
-    const [solar, price, scheduled, autoStatus, vehicleConfig, vehicles, sharedCharger, autoSettings] = await Promise.allSettled([
+    const [solar, price, scheduled, autoStatus, vehicleConfig, vehicles, sharedCharger, autoSettings, optimization] = await Promise.allSettled([
       this._hass.callApi('GET', EV_PANEL_PATHS.solar),
       this._hass.callApi('GET', EV_PANEL_PATHS.price),
       this._hass.callApi('GET', EV_PANEL_PATHS.scheduled),
@@ -5448,6 +5469,7 @@ class PowerSyncEVPanel extends HTMLElement {
       this._hass.callApi('GET', EV_PANEL_PATHS.vehicles),
       this._hass.callApi('GET', EV_PANEL_PATHS.sharedCharger),
       this._hass.callApi('GET', EV_PANEL_PATHS.autoSettings),
+      this._hass.callApi('GET', EV_PANEL_PATHS.optimization),
     ]);
 
     const modeErrors = [];
@@ -5482,6 +5504,8 @@ class PowerSyncEVPanel extends HTMLElement {
       vehicleConfigs: unwrap(vehicleConfig, 'configs', []),
       vehicles: unwrap(vehicles, 'vehicles', []),
       sharedCharger: unwrap(sharedCharger, 'shared_charger', null),
+      // Optional: older integrations have no ev_return; never an error.
+      evReturn: optimization.status === 'fulfilled' ? (optimization.value?.ev_return || {}) : {},
       modeErrors,
       fetchedAt: new Date().toISOString(),
     };
@@ -6007,6 +6031,13 @@ class PowerSyncEVPanel extends HTMLElement {
           font-weight: 600;
           line-height: 1.25;
         }
+        .away-threshold {
+          display: grid;
+          gap: 4px;
+          margin-top: 8px;
+          font-size: 13px;
+        }
+        .away-threshold input { width: 100%; }
         .capacity-editor {
           display: flex;
           align-items: end;
@@ -6308,6 +6339,7 @@ class PowerSyncEVPanel extends HTMLElement {
         ${selected && !selected.connected && selected.plug_state_known === false ? this._noticeHtml('', 'No connector status sensor is configured, so PowerSync cannot tell whether the car is plugged in. Start turns the charger switch on.') : ''}
         ${conflict ? this._noticeHtml('warn', `${this._ownerLabel(selected.owner_mode)} currently controls this loadpoint. Manual Start will take over.`) : ''}
         ${this._sharedChargerHtml()}
+        ${this._awayCarsHtml()}
         ${this._bydVehiclesHtml()}
         ${this._modeSectionsHtml()}
       </ha-card>
@@ -6453,6 +6485,74 @@ class PowerSyncEVPanel extends HTMLElement {
       operation: 'save', vehicle_id: create ? null : shared.selected_vehicle_id,
       name, soc_entity: socEntity, battery_capacity_kwh: capacity,
     }, 'Vehicle saved. Select it before connecting, then set its Smart Schedule.', shared);
+  }
+
+  _awayCarsHtml() {
+    const evReturn = this._data?.evReturn || {};
+    const cars = Object.entries(evReturn).filter(([, car]) => car && car.away === true);
+    if (!cars.length) return '';
+    const configs = this._data?.vehicleConfigs || [];
+    const same = (a, b) => !!a && !!b && String(a).toUpperCase() === String(b).toUpperCase();
+    return `
+      <div class="byd-vehicles away-cars">
+        <div class="byd-title">Away cars</div>
+        <div class="byd-subtitle">How each away car is treated in tonight's battery plan.</div>
+        ${cars.map(([key, car]) => {
+          const config = configs.find((item) => same(item.vehicle_id, key));
+          const name = config?.display_name || key;
+          const facts = [
+            Number.isFinite(car.distance_from_home_km) ? `${Math.round(car.distance_from_home_km)} km from home` : null,
+            Number.isFinite(car.soc) ? `${Math.round(car.soc)}%` : null,
+          ].filter(Boolean).join(' | ');
+          const owner = String(car.source || '').startsWith('owner_');
+          const threshold = evReturnThreshold(config?.return_prompt_threshold);
+          const asked = car.question_sent_at && !owner
+            ? `Asked at ${new Date(car.question_sent_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${Number.isFinite(car.question_value) ? ` (worth about $${car.question_value.toFixed(2)})` : ''}.`
+            : '';
+          return `
+            <div class="byd-vehicle" data-away-car="${this._escAttr(key)}">
+              <div class="byd-vehicle-head">
+                <div>
+                  <div class="smart-name">${this._escHtml(name)}</div>
+                  <div class="smart-meta">${this._escHtml(facts)}</div>
+                </div>
+                <div class="pill ${car.counts_as_home_demand ? 'on' : 'warn'}">${car.counts_as_home_demand ? 'Planned' : 'Not planned'}</div>
+              </div>
+              <div class="smart-meta">${this._escHtml(EV_RETURN_SUMMARY[car.source] || car.reason || '')}</div>
+              ${asked ? `<div class="smart-meta">${this._escHtml(asked)}</div>` : ''}
+              <div class="capacity-editor">
+                ${car.source !== 'owner_not_home' ? `<button class="command" data-ev-return="not_home" data-ev-return-vehicle="${this._escAttr(key)}" data-ev-return-entry="${this._escAttr(car.entry_id || '')}" ${this._savingKey || !car.entry_id ? 'disabled' : ''}>Not home tonight</button>` : ''}
+                ${owner ? `<button class="command" data-ev-return="auto" data-ev-return-vehicle="${this._escAttr(key)}" data-ev-return-entry="${this._escAttr(car.entry_id || '')}" ${this._savingKey || !car.entry_id ? 'disabled' : ''}>Back to automatic</button>` : ''}
+              </div>
+              ${config ? `
+                <label class="away-threshold">Ask if it's coming home: <output data-return-threshold-label="${this._escAttr(config.vehicle_id)}">${this._escHtml(evReturnThresholdLabel(threshold))}</output>
+                  <input type="range" min="0" max="10" step="0.5" value="${this._escAttr(threshold)}" data-return-threshold="${this._escAttr(config.vehicle_id)}" ${this._savingKey ? 'disabled' : ''}>
+                </label>
+                <div class="smart-meta">When it isn't clear whether this car is coming home, you get a notification if the answer could change tonight's plan by at least this much.</div>` : ''}
+            </div>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  async _setEvReturn(entryId, vehicleId, mode) {
+    if (this._savingKey || !this._hass || !entryId) return;
+    this._savingKey = `ev-return:${vehicleId}`;
+    this._notice = null;
+    this._scheduleRender();
+    try {
+      await this._hass.callService('power_sync', 'set_ev_return', { entry_id: entryId, vehicle_id: vehicleId, mode });
+      this._notice = { type: '', message: mode === 'auto' ? 'Back to automatic' : 'Saved: not home tonight' };
+      this._lastFetch = 0;
+      this._lastRequestStartedAt = 0;
+      EV_PANEL_CACHE.delete(this._cacheKey());
+      await this._loadData(this._cacheKey());
+    } catch (err) {
+      this._notice = { type: 'error', message: err?.message || 'Could not save the answer' };
+    } finally {
+      this._savingKey = null;
+      this._scheduleRender();
+    }
   }
 
   _bydVehiclesHtml() {
@@ -7121,6 +7221,19 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _attachEvents() {
     const sharedAtRender = this._data?.sharedCharger;
+    this.shadowRoot.querySelectorAll('[data-ev-return]').forEach((button) => {
+      button.addEventListener('click', () => this._setEvReturn(
+        button.dataset.evReturnEntry, button.dataset.evReturnVehicle, button.dataset.evReturn));
+    });
+    this.shadowRoot.querySelectorAll('[data-return-threshold]').forEach((input) => {
+      const vehicleId = input.dataset.returnThreshold;
+      const label = this.shadowRoot.querySelector(`[data-return-threshold-label="${CSS.escape(vehicleId)}"]`);
+      input.addEventListener('input', () => { if (label) label.textContent = evReturnThresholdLabel(evReturnThreshold(input.value)); });
+      input.addEventListener('change', () => this._runCommand(
+        `return-threshold:${vehicleId}`, EV_PANEL_PATHS.vehicleConfig,
+        { vehicle_id: vehicleId, return_prompt_threshold: evReturnThreshold(input.value) },
+        'Notification threshold saved'));
+    });
     const discardConflicts = () => {
       for (const [key, failed] of this._notice?.conflicts || []) {
         if (this._settingDrafts.get(key) === failed) this._settingDrafts.delete(key);

@@ -1763,3 +1763,42 @@ def test_historical_commute_reaches_real_handoff_and_economic_solver(
     live = method(coordinator, times)
     assert not live[0].forecast_only
     assert live[0].energy_needed_kwh == 13.75
+
+
+def test_away_car_with_no_expected_return_adds_no_home_demand(build_ev_charge_plan):
+    """2026-11-28: a car hours away kept its whole plan in tonight's battery plan."""
+    ev_return = importlib.import_module("power_sync.optimization.ev_return")
+    method, holder, warnings = build_ev_charge_plan
+    deadline = _NOW + timedelta(hours=13)
+    executor = _ev_executor(deadline.isoformat())
+    holder["executor"] = executor
+    times = _solve_timestamps(28)
+    away = ev_return.EVReturnDecision(True, False, "no_return_evidence", "away")
+    coordinator = types.SimpleNamespace(
+        config_entry=_ENTRY, _ev_integration_enabled=True,
+        _ev_return_decisions={"veh-1": away})
+    assert not method(coordinator, times)
+
+    # Navigating home: demand comes from the detached return plan only.
+    arrival = _NOW + timedelta(hours=3)
+    nav = ev_return.EVReturnDecision(
+        True, True, "navigation", "home",
+        arrival=ev_return.EVReturnArrival(arrival, 40.0, "navigation"))
+    returning = types.SimpleNamespace(
+        target_time=deadline.isoformat(), energy_needed_kwh=20.0,
+        windows=[types.SimpleNamespace(start_time=arrival.isoformat(),
+                                       end_time=deadline.isoformat(), source="grid_offpeak",
+                                       estimated_power_kw=7.2, price_cents_kwh=20)])
+    coordinator._ev_return_decisions = {"veh-1": nav}
+    coordinator._ev_return_plans = {"veh-1": returning}
+    plans = method(coordinator, times)
+    assert warnings == []
+    assert len(plans) == 1 and plans[0].forecast_only
+    assert plans[0].energy_needed_kwh == pytest.approx(20.0)
+    assert plans[0].max_power_kw[:6] == (0,) * 6
+
+    # Home again (no decision): the live plan is back and executable.
+    coordinator._ev_return_decisions = {}
+    live = method(coordinator, times)
+    assert len(live) == 1 and not live[0].forecast_only
+    assert live[0].energy_needed_kwh == pytest.approx(13.75)

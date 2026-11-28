@@ -20,7 +20,7 @@ def actions():
         "asyncio": asyncio, "vol": vol, "DOMAIN": "power_sync",
         "HomeAssistantError": RuntimeError,
         "SupportsResponse": SimpleNamespace(OPTIONAL="optional"),
-        "cv": SimpleNamespace(string=str, boolean=vol.Boolean()),
+        "cv": SimpleNamespace(string=str, boolean=vol.Boolean(), datetime=str),
         "async_update_solar_surplus_config": AsyncMock(return_value={"enabled": False}),
     }
     tree = ast.parse((ROOT / "ev_charging_services.py").read_text())
@@ -170,7 +170,7 @@ def test_registered_actions_validate_entry_and_route_each_mode(actions):
     hass.config_entries = SimpleNamespace(async_get_entry=lambda eid: entry if eid == "one" else None)
     actions.register_services(hass)
     actions.register_services(hass)
-    assert len(registered) == 4
+    assert len(registered) == 5
     for mode in ("scheduled", "price_level", "solar_surplus"):
         handler, schema = registered[f"set_{mode}_charging"]
         asyncio.run(handler(SimpleNamespace(data=schema({"entry_id": "one", "enabled": False}))))
@@ -184,6 +184,14 @@ def test_registered_actions_validate_entry_and_route_each_mode(actions):
     _, schema = registered["set_scheduled_charging"]
     with pytest.raises(vol.Invalid):
         schema({"entry_id": "one", "enabled": "not a boolean"})
+    handler, schema = registered["set_ev_return"]
+    assert schema({"entry_id": "one", "vehicle_id": "VIN1", "mode": "not_home"})["mode"] == "not_home"
+    with pytest.raises(vol.Invalid):
+        schema({"entry_id": "one", "vehicle_id": "VIN1", "mode": "tomorrow"})
+    with pytest.raises(vol.Invalid):
+        schema({"entry_id": "one", "mode": "auto"})
+    with pytest.raises(RuntimeError, match="loaded PowerSync"):
+        asyncio.run(handler(SimpleNamespace(data={"entry_id": "other", "vehicle_id": "VIN1", "mode": "auto"})))
 
 
 @pytest.mark.parametrize("existing,hidden_by", [(False, None), (True, None), (True, "user")])
@@ -223,11 +231,11 @@ def test_actions_unregister_and_register_again_after_reload(actions):
         async_remove=lambda domain, name: registered.pop(name),
     ))
     actions.register_services(hass)
-    assert len(registered) == 4
+    assert len(registered) == 5
     actions.unregister_services(hass)
     assert registered == {}
     actions.register_services(hass)
-    assert len(registered) == 4
+    assert len(registered) == 5
 
 
 @pytest.mark.parametrize("remaining", [False, True])
@@ -248,3 +256,14 @@ def test_action_unload_ignores_global_metadata_but_preserves_other_entries(remai
           "SERVICE_SYNC_NOW": "sync_now", "_unregister_ev_charging_services": unregister}
     exec(compile(ast.Module(body=[cleanup], type_ignores=[]), "unload", "exec"), ns)
     assert unregister.call_count == (0 if remaining else 1)
+
+
+def test_not_home_default_lasts_until_next_morning(actions):
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=10))
+    evening = datetime(2026, 11, 28, 18, 0, tzinfo=tz)
+    assert actions._default_not_home_until(evening) == datetime(2026, 11, 29, 10, 0, tzinfo=tz)
+    early = datetime(2026, 11, 29, 6, 0, tzinfo=tz)
+    assert actions._default_not_home_until(early) == datetime(2026, 11, 29, 10, 0, tzinfo=tz)
+    late_morning = datetime(2026, 11, 29, 9, 30, tzinfo=tz)
+    assert actions._default_not_home_until(late_morning) == datetime(2026, 11, 30, 10, 0, tzinfo=tz)
