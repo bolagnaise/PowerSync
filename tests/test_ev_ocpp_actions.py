@@ -21648,7 +21648,6 @@ def _smart_schedule_switch_params(vehicle_id, owner_mode):
 
 @pytest.mark.parametrize("old_mode,new_mode", [
     ("smart_schedule", "smart_schedule_solar_surplus"),
-    ("smart_schedule_solar_surplus", "smart_schedule"),
 ])
 def test_smart_schedule_switch_keeps_the_running_charge(monkeypatch, old_mode, new_mode):
     """Live 2026-11-28 14:00: the free-grid window ended and Smart Schedule switched to solar.
@@ -21678,6 +21677,28 @@ def test_smart_schedule_switch_keeps_the_running_charge(monkeypatch, old_mode, n
         assert state["external_start_detection_armed"] is False
     _, lease = ev_ownership.get_ev_ownership(hass, entry, vin)
     assert lease["owner_mode"] == new_mode
+
+
+@pytest.mark.parametrize("case", ["solar_to_grid", "pinned_native_route"])
+def test_smart_schedule_switch_keeps_stop_then_start_when_adoption_is_unsafe(monkeypatch, case):
+    """Codex #229: solar->grid validates headroom after release; a native route is lease-scoped."""
+    from power_sync import tesla_ev_recovery
+
+    old_mode = "smart_schedule_solar_surplus" if case == "solar_to_grid" else "smart_schedule"
+    new_mode = "smart_schedule" if case == "solar_to_grid" else "smart_schedule_solar_surplus"
+    hass, entry, vin, _old_state, stop, _start, _set_amps = (
+        _charging_smart_schedule_session_for_boost(monkeypatch, owner_mode=old_mode))
+    _stub_smart_schedule_switch_environment(monkeypatch)
+    if case == "pinned_native_route":
+        monkeypatch.setattr(tesla_ev_recovery, "get_vehicle_route", Mock(return_value={
+            "kind": "ha", "entity_id": "switch.car_charge",
+            "session_scope": {"owner": "powersync", "owner_mode": "smart_schedule"},
+        }))
+
+    asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, _smart_schedule_switch_params(vin, new_mode)))
+
+    stop.assert_awaited()
 
 
 def test_smart_schedule_switch_without_live_charging_keeps_stop_then_start(monkeypatch):

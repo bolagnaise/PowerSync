@@ -20683,13 +20683,24 @@ async def _action_start_ev_charging_dynamic_locked(
     boost_adoption_state = None
     boost_adoption_evidence = None
     adoptable_state = entry_vehicles.get(vehicle_id)
-    smart_schedule_modes = {"smart_schedule", "smart_schedule_solar_surplus"}
+    # Only grid -> solar: the solar controller registers without a
+    # start-time headroom gate that could fail after the old controller is
+    # released. A pinned native (Fleet/Teslemetry) route is scoped to the old
+    # lease and would refuse the solar controller's rate commands, so only a
+    # BLE or unpinned route is adopted; everything else keeps stop-then-start.
     smart_schedule_switch = (
-        owner_mode in smart_schedule_modes
+        owner_mode == "smart_schedule_solar_surplus"
+        and dynamic_mode == "solar_surplus"
         and isinstance(_lease, dict)
-        and _lease.get("owner_mode") in smart_schedule_modes
-        and _lease.get("owner_mode") != owner_mode
+        and _lease.get("owner_mode") == "smart_schedule"
     )
+    if smart_schedule_switch:
+        from ..tesla_ev_recovery import get_vehicle_route as _adoption_route
+
+        _switch_route = _adoption_route(hass, config_entry, vehicle_id)
+        smart_schedule_switch = (
+            _switch_route is None or _switch_route.get("kind") == "ble"
+        )
     if (
         charger_type == "tesla"
         and (
