@@ -612,3 +612,41 @@ def normalize_energy_data(
     result["load_power"] = normalized.non_ev_home_load_kw
     result["site_load_power"] = max(0.0, raw_load)
     return result
+
+
+SURPLUS_ACTIVE_EV_POWER_EPSILON_KW = 0.05
+
+
+def surplus_ev_power_kw(
+    commanded_kw: Any,
+    observed_kw: Any,
+    observed_available: bool,
+    *,
+    reported_stopped: bool = False,
+    restart_telemetry_pending: bool = False,
+) -> float:
+    """Resolve the EV load that grid-based surplus adds back.
+
+    The grid meter has already netted off what the car draws, so a charging
+    car must never be counted as 0 kW just because its reading is missing or
+    has not caught up. A positive reading is the load. Without one, the last
+    commanded power stands in, unless an available zero reading comes with an
+    explicit stopped state. During the post-restart grace the larger of the two
+    is kept while telemetry catches up.
+    """
+    def non_negative(value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, number) if math.isfinite(number) else 0.0
+
+    commanded = non_negative(commanded_kw)
+    observed = non_negative(observed_kw)
+    if restart_telemetry_pending:
+        return max(commanded, observed)
+    if observed_available and observed > SURPLUS_ACTIVE_EV_POWER_EPSILON_KW:
+        return observed
+    if observed_available and reported_stopped:
+        return 0.0
+    return commanded

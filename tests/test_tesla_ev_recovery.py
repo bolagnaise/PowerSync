@@ -2841,3 +2841,171 @@ def test_late_retirement_for_old_hazard_cannot_retire_reused_prefix():
         "legacy-incident", {"operation": "stop"},
     )
     assert "recovery_retired" not in legacy_ref_runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["hazards"]["ble:bridge-a"]
+
+
+# --- Explicit reset when the stored recovery journal is lost -------------------
+
+@pytest.mark.asyncio
+async def test_missing_journal_hold_is_reset_only_with_confirmation(harness):
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    assert not await recovery.async_load_recovery_state(hass, entry, enrolled=True)
+    assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_missing"
+
+    refused = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=False)
+    assert refused == {"success": False, "error": "confirmation_required", "hold": "sidecar_missing"}
+    assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_missing"
+    assert store.saves == []
+
+    result = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=True)
+    assert result == {"success": True, "previous_hold": "sidecar_missing", "backup_saved": False}
+    assert "_tesla_ev_recovery_sidecar_hold" not in runtime
+    assert store.value["operator_reset"]["hold"] == "sidecar_missing"
+    # A restart now loads the fresh journal instead of reproducing the hold.
+    assert await recovery.async_load_recovery_state(hass, entry, enrolled=True)
+    route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    assert await recovery.async_begin_attempt(hass, entry, VIN_A, route, "start", route["entity_id"])
+
+
+@pytest.mark.asyncio
+async def test_unreadable_journal_is_backed_up_before_reset(harness, monkeypatch):
+    import sys
+    import types
+
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    store.value = {"schema_version": "not-a-version"}
+    assert not await recovery.async_load_recovery_state(hass, entry, enrolled=True)
+    assert runtime["_tesla_ev_recovery_sidecar_hold"] == "sidecar_malformed"
+
+    backups = {}
+
+    class BackupStore:
+        def __init__(self, _hass, _version, key, **_kwargs):
+            self.key = key
+
+        async def async_save(self, value):
+            backups[self.key] = deepcopy(value)
+
+    storage = types.ModuleType("homeassistant.helpers.storage")
+    storage.Store = BackupStore
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.storage", storage)
+
+    result = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=True)
+    assert result["success"] is True and result["backup_saved"] is True
+    (key, saved), = backups.items()
+    assert key.endswith(".reset_backup")
+    assert saved["data"] == {"schema_version": "not-a-version"}
+    assert saved["hold"] == "sidecar_malformed"
+
+
+@pytest.mark.asyncio
+async def test_reset_refuses_holds_that_can_clear_on_their_own(harness):
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime["_tesla_ev_recovery_sidecar_hold"] = "sidecar_load_failed"
+    result = await recovery.async_reset_recovery_store(hass, entry, confirm_vehicles_checked=True)
+    assert result == {"success": False, "error": "no_resettable_hold", "hold": "sidecar_load_failed"}
+    assert store.saves == []
+    del runtime["_tesla_ev_recovery_sidecar_hold"]
+    assert (await recovery.async_reset_recovery_store(
+        hass, entry, confirm_vehicles_checked=True,
+    ))["error"] == "no_resettable_hold"
+
+
+# --- Pruning released recovery history at load ---------------------------------
+
+@pytest.mark.asyncio
+async def test_load_prunes_only_old_released_history(harness):
+    import time as _time
+
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    runtime = hass.data["power_sync"][entry.entry_id]
+    now = _time.time()
+    old, recent = now - recovery.RELEASED_INCIDENT_RETENTION_SECONDS - 60, now - 60
+    state = recovery._new_sidecar()
+    state["incidents"] = {
+        "old_released": {"phase": "released", "released_at": old},
+        "recent_released": {"phase": "released", "released_at": recent},
+        "old_activation": {"phase": "released", "released_at": old, "activation_pending": True},
+        "old_no_stamp": {"phase": "released"},
+        "held": {"phase": "held"},
+        "old_open_obligation": {"phase": "released", "released_at": old},
+    }
+    state["obligations"] = {
+        "old_released": {"phase": "released"},
+        "held": {"phase": "held"},
+        "old_open_obligation": {"phase": "held"},
+    }
+    state["liabilities"] = {"old_released": {"state": "retained_reconciled"}, "held": {}}
+    day = recovery.FINISHED_SUBMISSION_RETENTION_SECONDS
+    state["submissions"] = {
+        "old_done": {"status": "completed", "completed_at": now - day - 60},
+        "old_error": {"status": "error", "completed_at": now - day - 60},
+        "recent_done": {"status": "completed", "completed_at": now - 60},
+        "pending": {"status": "pending", "created_at": now - day - 60},
+        "tracked": {"status": "completed", "completed_at": now - day - 60},
+    }
+    store.value = state
+    runtime[recovery._SUBMISSIONS_KEY] = {"tracked": {"vehicle_id": VIN_A}}
+
+    assert await recovery.async_load_recovery_state(hass, entry)
+
+    saved = store.value
+    assert set(saved["incidents"]) == {
+        "recent_released", "old_activation", "old_no_stamp", "held", "old_open_obligation",
+    }
+    assert set(saved["obligations"]) == {"held", "old_open_obligation"}
+    assert set(saved["liabilities"]) == {"held"}
+    assert set(saved["submissions"]) == {"recent_done", "pending", "tracked"}
+    assert saved["revision"] > state["revision"]
+    assert runtime["_tesla_ev_recovery_sidecar"]["incidents"].keys() == saved["incidents"].keys()
+
+
+@pytest.mark.asyncio
+async def test_load_does_not_save_when_nothing_is_old_enough(harness):
+    hass, entry, store, _, _ = _sidecar_harness(harness)
+    state = recovery._new_sidecar()
+    state["incidents"] = {"held": {"phase": "held"}}
+    store.value = state
+    assert await recovery.async_load_recovery_state(hass, entry)
+    assert store.saves == []
+
+
+@pytest.mark.asyncio
+async def test_in_flight_ble_attempt_is_not_a_status_hold(harness):
+    """A Start still being sent must not report its own bridge as held."""
+    hass, entry, _, _ = harness
+    route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "start", route["entity_id"]
+    )
+    assert ticket is not None
+    # Control still refuses an overlapping command while this one is sent.
+    assert recovery.ble_quarantined(hass, "bridge_a")
+    # Status readers do not treat the in-flight command as a stuck hold.
+    assert not recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)
+
+    await recovery.async_finish_attempt(ticket, "sent_unknown")
+    # An unknown result is a genuine hold for status as well as control.
+    assert recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)
+
+
+@pytest.mark.asyncio
+async def test_pending_attempt_without_live_sender_still_holds(harness, monkeypatch):
+    """A pending row nobody is sending any more (restart or stale sender) holds."""
+    hass, entry, _, _ = harness
+    route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "start", route["entity_id"]
+    )
+    assert ticket is not None
+    started = recovery._IN_FLIGHT_ATTEMPTS[ticket.attempt_id]
+    monkeypatch.setattr(
+        recovery.time, "monotonic",
+        lambda: started + recovery.IN_FLIGHT_ATTEMPT_MAX_SECONDS + 1,
+    )
+    assert recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)
+
+    recovery._IN_FLIGHT_ATTEMPTS.clear()
+    assert recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)

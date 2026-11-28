@@ -2,32 +2,26 @@
 
 from __future__ import annotations
 
-import ast
-import textwrap
+import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 
-INIT_PATH = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync" / "__init__.py"
+LIVE_STATUS_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components" / "power_sync" / "automations" / "live_status.py"
+)
 
 
 def _fronius_snapshot_is_fresh():
-    """Load the nested Fronius guard without importing the integration."""
-    source = INIT_PATH.read_text()
-    module = ast.parse(source)
-    node = next(
-        candidate
-        for candidate in ast.walk(module)
-        if isinstance(candidate, ast.FunctionDef)
-        and candidate.name == "_fronius_snapshot_is_fresh"
+    """Load the shared Fronius guard without importing the integration."""
+    spec = importlib.util.spec_from_file_location("_live_status_under_test", LIVE_STATUS_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return lambda coordinator, data: module.fronius_snapshot_is_fresh(
+        coordinator, data, datetime.now(timezone.utc),
     )
-    namespace = {
-        "timedelta": timedelta,
-        "dt_util": SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
-    }
-    exec(textwrap.dedent(ast.get_source_segment(source, node) or ""), namespace)
-    return namespace["_fronius_snapshot_is_fresh"]
 
 
 def test_fronius_successful_ready_snapshot_without_optional_timestamp_is_usable():

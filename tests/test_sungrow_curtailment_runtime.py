@@ -22,6 +22,17 @@ SUNGROW_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" 
 TARIFF_UTILS_PATH = ROOT / "custom_components" / "power_sync" / "tariff_utils.py"
 
 
+LIVE_STATUS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "live_status.py"
+
+
+def _live_status_module():
+    """Load the shared site live-status builder without Home Assistant."""
+    spec = importlib.util.spec_from_file_location("power_sync_live_status_for_test", LIVE_STATUS_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_with_hysteresis():
     """Load the real HD-15/HD-24 hysteresis helper from tariff_utils.py."""
     spec = importlib.util.spec_from_file_location(
@@ -182,32 +193,35 @@ def test_ev_headroom_does_not_survive_session_change_during_read(change_at, chan
 
 
 def test_curtailment_cached_status_preserves_native_zero_export_with_normal_ac():
-    namespace = {
-        "DOMAIN": "power_sync", "Any": object,
-        "hass": SimpleNamespace(data={"power_sync": {"entry-id": {
-            "sigenergy_coordinator": SimpleNamespace(data={"is_curtailed": True}),
-            "inverter_last_state": "normal",
-        }}}),
-        "entry": SimpleNamespace(entry_id="entry-id"),
-        "_LOGGER": SimpleNamespace(debug=lambda *a: None),
-        "coordinator_data_to_ev_live_status": lambda data: dict(data),
-    }
-    tree = ast.parse(textwrap.dedent(_function_source("_get_cached_live_status")))
-
-    class StripImports(ast.NodeTransformer):
-        def visit_ImportFrom(self, node):
-            return ast.copy_location(ast.Pass(), node)
-
-    exec(compile(ast.fix_missing_locations(StripImports().visit(tree)), "<cached-status>", "exec"), namespace)
-    assert namespace["_get_cached_live_status"]()["is_curtailed"] is True
+    coordinator = SimpleNamespace(
+        last_update_success=True,
+        data={"is_curtailed": True, "grid_power": 0, "solar_power": 1.2, "battery_power": 0},
+    )
+    live_status, _ = _live_status_module().site_live_status(
+        {"sigenergy_coordinator": coordinator, "inverter_last_state": "normal"},
+        datetime.now(timezone.utc),
+    )
+    assert live_status["is_curtailed"] is True
+    assert live_status["ac_production_curtailed"] is False
 
 
 def test_ev_live_status_does_not_force_cached_sungrow_curtailment_state():
-    source = _actions_function_source("_get_tesla_live_status")
-
-    assert "sungrow_curtailment_state" not in source
-    assert 'entry_data.get("inverter_last_state") == "curtailed"' in source
-    assert 'live_status["is_curtailed"] = True' in source
+    assert "site_live_status(entry_data" in _actions_function_source("_get_tesla_live_status")
+    module = _live_status_module()
+    assert "sungrow_curtailment_state" not in LIVE_STATUS_PATH.read_text()
+    coordinator = SimpleNamespace(
+        last_update_success=True,
+        data={"grid_power": -1.0, "solar_power": 3.0, "battery_power": 0},
+    )
+    now = datetime.now(timezone.utc)
+    for ac_state, curtailed in (("curtailed", True), ("normal", False)):
+        live_status, _ = module.site_live_status(
+            {"sungrow_coordinator": coordinator, "inverter_last_state": ac_state,
+             "sungrow_curtailment_state": "curtailed"},
+            now,
+        )
+        assert live_status["is_curtailed"] is curtailed
+        assert live_status["ac_production_curtailed"] is curtailed
 
 
 def test_inverter_status_api_uses_ac_inverter_state_not_native_sungrow_state():
@@ -771,6 +785,7 @@ def _cached_fronius_live_status(
         data={
             "telemetry_ready": telemetry_ready,
             "load_power": 1.2,
+            "solar_power": 0.0,
             "grid_power": -0.4,
             "battery_power": 0.0,
         },
@@ -788,30 +803,10 @@ def _cached_fronius_live_status(
             }
         }
     )
-    entry = SimpleNamespace(entry_id=entry_id)
-    source = _function_source("_get_cached_live_status").replace(
-        "            from .automations.live_status import coordinator_data_to_ev_live_status\n\n",
-        "",
+    live_status, _configured = _live_status_module().site_live_status(
+        hass.data["power_sync"][entry_id], datetime.now(timezone.utc),
     )
-    namespace = {
-        "Any": object,
-        "DOMAIN": "power_sync",
-        "hass": hass,
-        "entry": entry,
-        "timedelta": timedelta,
-        "dt_util": SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc)),
-        "_LOGGER": SimpleNamespace(
-            debug=lambda *args, **kwargs: None,
-            warning=lambda *args, **kwargs: None,
-        ),
-        "coordinator_data_to_ev_live_status": lambda data: {
-            "load_power": data["load_power"] * 1000,
-            "grid_power": data["grid_power"] * 1000,
-            "battery_power": data["battery_power"] * 1000,
-        },
-    }
-    exec(textwrap.dedent(source), namespace)
-    return namespace["_get_cached_live_status"]()
+    return live_status
 
 
 def test_fronius_load_following_rejects_failed_not_ready_or_stale_snapshot():
@@ -1199,12 +1194,11 @@ def test_periodic_solar_curtailment_routes_ac_inverter_without_tesla_token():
 def test_ac_curtailment_live_status_uses_non_tesla_coordinator_before_api():
     helper = _function_source("_get_cached_live_status")
     live_status = _function_source("get_live_status")
+    keys = _live_status_module().SITE_LIVE_STATUS_COORDINATOR_KEYS
 
-    assert "coordinator_data_to_ev_live_status" in helper
-    assert '"fronius_reserva_coordinator"' in helper
-    assert '"goodwe_coordinator"' in helper
-    assert '"solaredge_coordinator"' in helper
-    assert 'live_status["is_curtailed"] = True' in helper
+    assert "site_live_status(entry_data" in helper
+    for key in ("fronius_reserva_coordinator", "goodwe_coordinator", "solaredge_coordinator"):
+        assert key in keys
     assert "cached_status = _get_cached_live_status()" in live_status
     assert "if not callable(token_getter):" in live_status
     assert live_status.index("cached_status = _get_cached_live_status()") < live_status.index(

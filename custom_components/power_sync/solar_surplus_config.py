@@ -119,3 +119,80 @@ def get_stored_solar_surplus_config(entry_data: Mapping[str, Any] | None) -> dic
             stored_config = entry_data.get("solar_surplus_config")
 
     return normalize_solar_surplus_config(stored_config)
+
+
+# --- What every surplus calculation withholds from the EV -----------------------
+#
+# Live control, the Smart Schedule forecast and the optimizer all estimate how
+# much solar the EV may use. They read different inputs (meters or forecasts),
+# but the amounts withheld for the household and for the home battery must be
+# the same, or a plan promises solar that live control will not hand out.
+
+# At or above this SOC the battery cannot absorb a parallel-charge reserve.
+BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def get_household_buffer_kw(config: Mapping[str, Any] | None) -> float:
+    """Return the household margin kept back from every EV surplus estimate."""
+    default = DEFAULT_SOLAR_SURPLUS_CONFIG["household_buffer_kw"]
+    value = _finite_float((config or {}).get("household_buffer_kw", default))
+    return max(0.0, default if value is None else value)
+
+
+def get_parallel_charge_rate_kw(config: Mapping[str, Any] | None) -> float:
+    """Return the battery charge rate reserved while parallel charging is on."""
+    if not (config or {}).get("allow_parallel_charging", False):
+        return 0.0
+    default = DEFAULT_SOLAR_SURPLUS_CONFIG["max_battery_charge_rate_kw"]
+    value = _finite_float((config or {}).get("max_battery_charge_rate_kw", default) or 0.0)
+    return max(0.0, default if value is None else value)
+
+
+def parallel_battery_reserve_kw(
+    config: Mapping[str, Any] | None,
+    battery_soc: Any,
+    battery_charge_kw: float,
+    method: str,
+) -> float:
+    """Return the live battery reserve to withhold from EV surplus.
+
+    The reserve applies only while the battery is below the configured minimum
+    or is charging, and never once it is full. The direct method already counts
+    measured battery charging as load, so it only tops the reserve up.
+    """
+    max_charge_kw = get_parallel_charge_rate_kw(config)
+    if max_charge_kw <= 0:
+        return 0.0
+    soc = _finite_float(battery_soc) if battery_soc is not None else None
+    if soc is not None and soc >= BATTERY_FULL_RESERVE_BYPASS_SOC:
+        return 0.0
+    battery_below_min = soc is not None and soc < get_solar_surplus_min_battery_soc(config)
+    if not battery_below_min and battery_charge_kw <= 0.05:
+        return 0.0
+    if method == "direct":
+        return max(0.0, max_charge_kw - battery_charge_kw)
+    return max_charge_kw
+
+
+def forecast_ev_surplus_kw(
+    pv_kw: float, load_kw: float, config: Mapping[str, Any] | None,
+) -> float:
+    """Return forecast solar the EV may use, withholding what live control would.
+
+    A forecast has no battery SOC, so the parallel-charge reserve is assumed to
+    apply, matching the optimizer.
+    """
+    return max(
+        0.0,
+        pv_kw - load_kw - get_household_buffer_kw(config) - get_parallel_charge_rate_kw(config),
+    )

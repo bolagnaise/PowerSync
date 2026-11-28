@@ -1067,7 +1067,7 @@ def test_quarantined_ble_cannot_renew_telemetry_from_soc_or_connection(monkeypat
     from power_sync.automations.loadpoint_status import build_loadpoint_status
 
     monkeypatch.setattr(importlib.import_module("power_sync.tesla_ev_recovery"),
-                        "ble_quarantined", lambda *_args: True)
+                        "ble_quarantined", lambda *_args, **_kwargs: True)
     now = datetime.now(timezone.utc)
     hass = _Hass([
         _State("binary_sensor.home_ble_status", "on", last_updated=now),
@@ -1103,7 +1103,7 @@ def test_held_ble_counts_only_current_paired_charging_power(monkeypatch, evidenc
     from power_sync.ev_load import HomeLoadBasis, aggregate_ev_load, normalize_home_load
 
     recovery = importlib.import_module("power_sync.tesla_ev_recovery")
-    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args: True)
+    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args, **_kwargs: True)
     now = datetime.now(timezone.utc)
     original = now - timedelta(minutes=12)
     sample_at = now - timedelta(seconds=12)
@@ -5947,7 +5947,7 @@ def test_quarantined_ble_bridge_logs_hold_once_and_release(monkeypatch, caplog):
     power_sync = _power_sync_module()
     recovery = importlib.import_module("power_sync.tesla_ev_recovery")
     held = {"value": True}
-    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args: held["value"])
+    monkeypatch.setattr(recovery, "ble_quarantined", lambda *_args, **_kwargs: held["value"])
     now = datetime.now(timezone.utc)
     hass = _Hass([
         _State("binary_sensor.home_ble_status", "on", last_updated=now),
@@ -5970,3 +5970,33 @@ def test_quarantined_ble_bridge_logs_hold_once_and_release(monkeypatch, caplog):
         view._get_tesla_ble_vehicle("home_ble")
     released = [r for r in caplog.records if "recovery hold released" in r.getMessage()]
     assert len(released) == 1
+
+
+def test_loadpoint_status_hides_recovery_card_for_in_flight_command(monkeypatch):
+    """A command still being sent is not a recovery hold for the app card."""
+    power_sync = _power_sync_module()
+    recovery = importlib.import_module("power_sync.tesla_ev_recovery")
+    monkeypatch.setattr(power_sync, "_configured_sigenergy_charger_state", lambda _entry: None)
+    vin = "5YJTEST0000000001"
+    observations = [{"vehicle_id": vin, "vehicle_name": "Car", "charger_type": "tesla",
+                     "is_connected": True, "is_charging": False, "ev_power_kw": 0, "ev_soc": 60}]
+    monkeypatch.setattr(power_sync, "_get_ev_vehicles_status", lambda *_args, **_kwargs: observations)
+    attempt = {"attempt_id": "live-start", "route": {"kind": "ble", "prefix": "teslable"},
+               "outcome": "pending"}
+    journal = {"vehicles": {vin: {"route": None, "attempts": {"live-start": attempt}, "hazards": {}}}}
+    hass = _Hass([], entry_data={recovery.RECOVERY_KEY: journal})
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    view = power_sync.EVLoadpointStatusView(hass, entry)
+
+    def blocker():
+        payload = json.loads(asyncio.run(view._async_build_response(None)).body)
+        assert payload["success"] is True, payload
+        return payload["loadpoints"][0]["control_blocker"]
+
+    monkeypatch.setitem(recovery._IN_FLIGHT_ATTEMPTS, "live-start", recovery.time.monotonic())
+    assert blocker() is None
+    # Control routing still refuses an overlapping command meanwhile.
+    assert recovery.get_vehicle_route(hass, entry, vin)["kind"] == "blocked"
+
+    recovery._IN_FLIGHT_ATTEMPTS.pop("live-start")
+    assert blocker() == "ble_recovery"

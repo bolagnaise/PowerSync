@@ -23,25 +23,27 @@ def test_views_keep_the_coordinator_home_load_basis():
 
     Tesla/Sigenergy coordinators publish ``home_load_basis="excludes_ev"``;
     dropping it made the direct method subtract the car twice (8 kW solar,
-    1 kW house, 7 kW car read 13.5 kW available instead of 6.5 kW).
+    1 kW house, 7 kW car read 13.5 kW available instead of 6.5 kW). Both
+    views read the site through the shared builder, which keeps the basis.
     """
+    import importlib.util
+
     tree = ast.parse(INIT.read_text())
     for name in ("SolarSurplusStatusView", "PriceRecommendationView"):
         view = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name)
-        dicts = [
-            node.value for node in ast.walk(view)
-            if isinstance(node, ast.Assign)
-            and any(getattr(t, "id", None) == "live_status" for t in node.targets)
-            and isinstance(node.value, ast.Dict)
-        ]
-        assert dicts, name
-        for value in dicts:
-            keys = {k.value for k in value.keys if isinstance(k, ast.Constant)}
-            assert "home_load_basis" in keys, name
-        reads = [
+        calls = [
             node for node in ast.walk(view)
-            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "get"
-            and node.args and isinstance(node.args[0], ast.Constant)
-            and node.args[0].value == "home_load_basis"
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_surplus_view_site"
         ]
-        assert len(reads) == 4, name  # tesla, sigenergy, sungrow, foxess
+        assert calls, name
+
+    path = INIT.parent / "automations" / "live_status.py"
+    spec = importlib.util.spec_from_file_location("live_status_basis_test", path)
+    live_status_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(live_status_module)
+    for basis in ("excludes_ev", "includes_ev"):
+        status = live_status_module.coordinator_data_to_ev_live_status({
+            "solar_power": 8.0, "load_power": 1.0, "grid_power": 0.0,
+            "battery_power": 0.0, "ev_power": 7.0, "home_load_basis": basis,
+        })
+        assert status["home_load_basis"] == basis

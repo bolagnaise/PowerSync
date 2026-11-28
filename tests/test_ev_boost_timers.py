@@ -80,6 +80,13 @@ class Timer:
         self.cancelled = True
 
 
+def _mark_submitted(params):
+    """What every real Tesla writer does once it opens a Start."""
+    result = params.get("_boost_start_result")
+    if isinstance(result, dict):
+        result["submitted"] = True
+
+
 class BoostHarness:
     def __init__(self):
         self.entry = SimpleNamespace(entry_id="entry", data={}, options={})
@@ -294,10 +301,13 @@ class BoostHarness:
                 entered.set()
                 await release.wait()
             if vin in self.ambiguous_start:
+                # A Start reached the car's writer, then its outcome was lost.
+                _mark_submitted(params)
                 self.physical[vin] = True
                 return False
             if vin in self.fail_start:
                 return False
+            _mark_submitted(params)
             # A duplicate start can reuse the actual controller's state object.
             state = self.states["entry"].setdefault(vin, {})
             state.update(active=True, current_amps=6, params=dict(params))
@@ -1598,3 +1608,49 @@ async def test_native_boost_reload_rebinds_only_exact_producer_for_stop(monkeypa
         assert restored.stops() == [VIN_A]
         assert [kind for kind, _vin, _params in restored.calls] == ["stop_ev_charging_dynamic"]
         assert restored.runtime["ev_boost_sessions"] == {}
+
+
+
+@pytest.mark.asyncio
+async def test_start_refused_before_any_writer_does_not_hold_the_next_boost():
+    """A Start no writer opened (e.g. a recovery hold) is not an unknown outcome."""
+    h = BoostHarness()
+    h.fail_start.add(VIN_A)
+    reply = await h.start(VIN_A, 60)
+    assert reply["success"] is False and reply["recovery_pending"] is True
+    assert reply["error"] == "Start was refused before reaching the car"
+    record = h.store.saved["ev_runtime_state"]["boost_sessions"][VIN_A]
+    assert record["dispatch_started"] is False and record.get("unknown_start_outcome") is not True
+
+    h.now += timedelta(seconds=30)
+    await h.due()
+    assert VIN_A not in h.runtime["ev_boost_sessions"]
+    assert not h.stops()
+    h.fail_start.clear()
+    assert (await h.start(VIN_A, 60))["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_slow_boost_start_replies_accepted_and_finishes_in_background():
+    """A start still waking the car must not hold the phone request open."""
+    h = BoostHarness()
+    release = asyncio.Event()
+    original = h.apply["start_ev_charging_dynamic"]
+
+    async def slow_start(hass, config_entry, params):
+        await release.wait()
+        return await original(hass, config_entry, params)
+
+    h.apply["start_ev_charging_dynamic"] = slow_start
+    h.view._boost_response_wait_seconds = 0.05
+    reply = await h.start(VIN_A, 1)
+    assert reply["success"] is True and reply["pending"] is True
+    assert "waking" in reply["message"]
+
+    release.set()
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if h.runtime.get("ev_boost_timers", {}).get(VIN_A):
+            break
+    assert VIN_A in h.runtime["ev_boost_timers"]
+    assert h.owner(VIN_A)["owner_mode"] == "boost"

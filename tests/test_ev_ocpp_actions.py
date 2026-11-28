@@ -7461,6 +7461,13 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
             "both_stock_idle", "both_stock_idle_bound_fleet",
         }:
             expect_physical_stop = False
+    # One bridge rule: a native power packet at 0 kW, or a stock bridge reporting
+    # Stopped and 0 kW together, proves the stop. A current sensor is optional.
+    bridge_proved = transition in {"boost", "charge_ceiling"} and scenario in {
+        "both_paired_stopped", "both_missing_packet",
+    }
+    if bridge_proved or (transition == "smart_schedule" and scenario == "both_missing_packet"):
+        expect_physical_stop = False
     hass = _Hass(states)
     if scenario == "both_stock_wrong_producer":
         hass.entity_registry.entities["sensor.car_charger_power"].device_id = "other-bridge"
@@ -7589,7 +7596,7 @@ def test_solar_surplus_releases_only_verified_idle_tesla(
         assert physical_stop.await_args.args[2]["vehicle_vin"] == vehicle_id
     else:
         physical_stop.assert_not_awaited()
-        if scenario in {"both_stock_idle", "both_stock_idle_bound_fleet"}:
+        if bridge_proved or scenario in {"both_stock_idle", "both_stock_idle_bound_fleet"}:
             observe.assert_not_called()
         else:
             assert observe.call_args.args == (hass, vehicle_id)
@@ -7697,7 +7704,9 @@ def test_smart_schedule_stop_releases_only_verified_waiting_ble(monkeypatch, sce
         state["cancel_timer"].assert_not_called()
         stop.assert_not_awaited()
         return
-    if scenario == "idle":
+    if scenario in {"idle", "unpaired_state"}:
+        # A Stopped state fresh since the bridge connected need not share the
+        # power packet: the bridge does not resend an unchanged Stopped.
         assert result is True
         stop.assert_not_awaited()
     else:
@@ -20733,6 +20742,312 @@ def test_ble_stop_readback_accepts_unchanged_stopped_with_native_zero_power(
     assert result is expected
 
 
+# --- BLE-only Solar Surplus: release a verified-stopped waiting car without Stop ---
+
+@pytest.mark.parametrize("scenario", [
+    "idle", "stale", "wrong_bridge", "positive_draw", "start_attempted",
+    "unresolved_history", "unpaired_state", "charging_state",
+])
+def test_ble_only_solar_surplus_releases_only_verified_waiting_car(monkeypatch, scenario):
+    from power_sync import tesla_ev_recovery
+    from power_sync.automations import ev_ownership
+
+    entry = _Entry()
+    entry.options = {
+        actions.CONF_EV_PROVIDER: actions.EV_PROVIDER_TESLA_BLE,
+        actions.CONF_TESLA_BLE_ENTITY_PREFIX: "car",
+    }
+    stamp = datetime.now(timezone.utc)
+    if scenario == "stale":
+        stamp -= timedelta(minutes=10)
+    states = [
+        _State("switch.car_charger", "off"),
+        _State("switch.car_ble_connection", "on"),
+        _State("binary_sensor.car_ble_status", "on", last_updated=stamp - timedelta(seconds=5)),
+    ]
+    charging_state = "Charging" if scenario == "charging_state" else "Stopped"
+    for entity, value, attributes in (
+        ("sensor.car_charging_state", charging_state, {}),
+        ("sensor.car_charge_power", 1 if scenario == "positive_draw" else 0,
+         {"unit_of_measurement": "kW"}),
+    ):
+        states.extend([
+            _State(entity, str(value), attributes, last_updated=stamp),
+            _State(entity + "_sample", json.dumps(
+                {"v": 1, "t": stamp.isoformat(), "x": value}), last_updated=stamp),
+        ])
+    if scenario == "unpaired_state":
+        states = [s for s in states if s.entity_id != "sensor.car_charging_state_sample"]
+    hass = _Hass(states)
+    if scenario == "wrong_bridge":
+        hass.entity_registry.entities["sensor.car_charge_power_sample"].device_id = "other-bridge"
+    runtime = hass.data["power_sync"][entry.entry_id]
+    runtime[tesla_ev_recovery.RECOVERY_KEY] = {"vehicles": {}}
+    if scenario == "unresolved_history":
+        runtime[tesla_ev_recovery.RECOVERY_KEY] = {"vehicles": None}
+
+    state = {
+        "active": True,
+        "charging_started": False,
+        "current_amps": 0,
+        "target_amps": 0,
+        "cancel_timer": Mock(),
+        "params": {
+            "vehicle_vin": "ble_car",
+            "charger_type": "tesla",
+            "owner_mode": "solar_surplus",
+            "dynamic_mode": "solar_surplus",
+            "notify_on_complete": False,
+        },
+    }
+    if scenario == "start_attempted":
+        state["last_physical_restart_attempt_at"] = stamp
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {"ble_car": state})
+    ev_ownership.claim_ev_ownership(hass, entry, "ble_car", owner_mode="solar_surplus")
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", AsyncMock(return_value=None))
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", stop)
+
+    result = asyncio.run(actions._action_stop_ev_charging_dynamic(hass, entry, {
+        "vehicle_id": "ble_car",
+        "stop_charging": True,
+        "stop_reason": "Solar Surplus disabled",
+        "_expected_state": state,
+        "_automatic_solar_disable": True,
+    }))
+
+    assert result is True
+    if scenario in {"idle", "unpaired_state"}:
+        stop.assert_not_awaited()
+    else:
+        stop.assert_awaited_once()
+    state["cancel_timer"].assert_called_once_with()
+    assert "ble_car" not in actions._dynamic_ev_state.get(entry.entry_id, {})
+    assert not ev_ownership.get_ev_ownerships(hass, entry)
+
+
+# --- One bridge rule for "the waiting car is already stopped" -------------------
+
+def _bridge_states(*, native, stamp, connected_at, state="Stopped", power=0,
+                   current=None, current_at=None, state_at=None):
+    states = [
+        _State("switch.car_charger", "off"),
+        _State("switch.car_ble_connection", "on"),
+        _State("binary_sensor.car_ble_status", "on", last_updated=connected_at),
+        _State("sensor.car_charging_state", state, last_updated=state_at or stamp),
+        _State("sensor.car_charge_power", str(power), {"unit_of_measurement": "kW"}, last_updated=stamp),
+    ]
+    if native:
+        states.append(_State("sensor.car_charge_power_sample", json.dumps(
+            {"v": 1, "t": stamp.isoformat(), "x": power}), last_updated=stamp))
+    if current is not None:
+        states.append(_State("sensor.car_charge_current", str(current),
+                             {"unit_of_measurement": "A"}, last_updated=current_at or stamp))
+    return states
+
+
+@pytest.mark.parametrize(("case", "proved"), [
+    ("native", True),
+    ("native_state_older_than_power", True),
+    ("native_state_before_connect", False),
+    ("native_stale_power", False),
+    ("native_drawing", False),
+    ("native_charging_state", False),
+    ("native_newer_positive_current", False),
+    ("stock", True),
+    ("stock_zero_current", True),
+    ("stock_positive_current", False),
+    ("stock_stale_current", False),
+    ("stock_state_not_with_power", False),
+    ("wrong_bridge", False),
+    ("disconnected", False),
+])
+def test_one_bridge_rule_proves_a_waiting_car_stopped(case, proved):
+    now = datetime.now(timezone.utc)
+    stamp = now - timedelta(seconds=2)
+    connected_at = now - timedelta(minutes=5)
+    native = case.startswith("native") or case in {"wrong_bridge", "disconnected"}
+    kwargs = {}
+    if case == "native_state_older_than_power":
+        kwargs["state_at"] = now - timedelta(seconds=60)
+    if case == "native_state_before_connect":
+        kwargs["state_at"] = connected_at - timedelta(seconds=1)
+    if case == "native_stale_power":
+        stamp = now - timedelta(minutes=10)
+        connected_at = now - timedelta(minutes=20)
+    if case == "native_drawing":
+        kwargs["power"] = 1.2
+    if case == "native_charging_state":
+        kwargs["state"] = "Charging"
+    if case == "native_newer_positive_current":
+        kwargs.update(current=8, current_at=now - timedelta(seconds=1))
+    if case == "stock_zero_current":
+        kwargs["current"] = 0
+    if case == "stock_positive_current":
+        kwargs["current"] = 6
+    if case == "stock_stale_current":
+        kwargs.update(current=0, current_at=now - timedelta(minutes=10))
+    if case == "stock_state_not_with_power":
+        kwargs["state_at"] = now - timedelta(seconds=60)
+    hass = _Hass(_bridge_states(native=native, stamp=stamp, connected_at=connected_at, **kwargs))
+    if case == "wrong_bridge":
+        hass.entity_registry.entities["sensor.car_charge_power"].device_id = "other-bridge"
+    if case == "disconnected":
+        hass.states._states["binary_sensor.car_ble_status"].state = "off"
+
+    assert (actions._ble_bridge_proves_stopped(hass, "car") is not None) is proved
+
+
+def test_every_skip_stop_path_uses_the_one_bridge_rule():
+    source = (ROOT / "automations" / "actions.py").read_text()
+    for name in ("_waiting_ble_tesla_is_stopped", "_waiting_solar_bridge_is_stopped",
+                 "_waiting_solar_tesla_is_stopped"):
+        start = source.index(f"def {name}(")
+        body = source[start:source.index("\n\n\n", start)]
+        assert "_ble_bridge_proves_stopped(" in body, name
+        assert "_tesla_ble_recovery_start_state(" not in body, name
+
+
+# --- Home battery floor: an unknown level never stops a running session --------
+
+@pytest.mark.parametrize(("live_battery", "pauses"), [
+    ({"battery_soc": None}, False),  # telemetry gap
+    ({"battery_soc": 5}, True),      # real low reading
+])
+def test_solar_surplus_running_session_pauses_only_on_a_real_low_reading(
+    monkeypatch, live_battery, pauses,
+):
+    async def no(*args, **kwargs):
+        return None
+
+    async def fake_live_status(*args, **kwargs):
+        return {"grid_power": -5000, "solar_power": 6000, "battery_power": 0,
+                "load_power": 1000, **live_battery}
+
+    async def fake_set_vehicle_amps(*args, **kwargs):
+        return True
+
+    floor_stops = []
+
+    async def fake_stop(*args, **kwargs):
+        floor_stops.append(args)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", no)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", fake_stop)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
+    actions._dynamic_ev_state.clear()
+    state = {
+        "active": True, "charging_started": True, "paused": False,
+        "current_amps": 16, "target_amps": 16,
+        "high_surplus_start": datetime.now() - timedelta(minutes=5),
+        "params": {
+            "dynamic_mode": "solar_surplus", "charger_type": "generic",
+            "charger_amps_entity": "number.garage_ev_current",
+            "min_charge_amps": 5, "max_charge_amps": 32,
+            "min_battery_soc": 80, "pause_below_soc": 70, "stop_at_battery_floor": True,
+            "household_buffer_kw": 0, "sustained_surplus_minutes": 2,
+            "stop_delay_minutes": 5, "voltage": 240, "phases": 1,
+        },
+    }
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+    hass = _Hass([_State("number.garage_ev_current", "16", {"min": 6, "max": 32})])
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert bool(state.get("paused")) is pauses
+    if not pauses:
+        assert not (state.get("stop_outcome") or {}).get("battery_floor")
+
+
+@pytest.mark.parametrize("stop_ok", [True, None, False])
+def test_fresh_stopped_report_settles_an_uncertain_start(monkeypatch, stop_ok):
+    """An uncertain Start must not keep solar discovery refused after a real Stop."""
+    # The car reports Stopped, so its retained command is not counted as surplus.
+    hass = _Hass([_State("sensor.VIN123_charging_state", "stopped",
+                         last_changed=datetime.now(timezone.utc) - timedelta(minutes=2))])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
+    state["transport_recovery_pending"] = True
+    state["params"]["notify_on_complete"] = False
+    state["params"]["owner_mode"] = "solar_surplus"
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": 0, "battery_power": 0,
+        "solar_power": 0, "load_power": 500,
+    })
+
+    async def set_amps(hass, config_entry, vid, amps, params):
+        return stop_ok if amps == 0 else True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+
+    async def observed_power(*args, **kwargs):
+        return 0.0, True
+
+    monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", observed_power)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    # The car's fresh Stopped report settles the uncertain Start on its own.
+    assert "transport_recovery_pending" not in state
+    assert state["current_amps"] == 0
+
+
+
+def _uncertain_start_tick(monkeypatch, *, hass, stop_ok=True, observed=(0.0, True), **state_extra):
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
+    state["transport_recovery_pending"] = True
+    state["params"]["notify_on_complete"] = False
+    state["params"]["owner_mode"] = "solar_surplus"
+    state.update(state_extra)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": 0, "battery_power": 0,
+        "solar_power": 0, "load_power": 500,
+    })
+    stops = []
+
+    async def set_amps(hass, config_entry, vid, amps, params):
+        stops.append(amps)
+        return stop_ok if amps == 0 else True
+
+    async def observed_power(*args, **kwargs):
+        return observed
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    monkeypatch.setattr(actions, "_get_observed_ev_power_reading_kw", observed_power)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    return state, stops
+
+
+def test_uncertain_start_is_kept_during_the_post_command_grace(monkeypatch):
+    hass = _Hass([_State("sensor.VIN123_charging_state", "stopped",
+                         last_changed=datetime.now(timezone.utc))])
+    state, _stops = _uncertain_start_tick(
+        monkeypatch, hass=hass, last_start_command_at=datetime.now(),
+    )
+    assert state.get("transport_recovery_pending") is True
+
+
+@pytest.mark.parametrize(("stop_ok", "settled"), [(True, True), (None, False), (False, False)])
+def test_confirmed_zero_amp_stop_settles_an_uncertain_start(monkeypatch, stop_ok, settled):
+    """Without a Stopped report, only a successful Stop settles the uncertain Start."""
+    state, stops = _uncertain_start_tick(
+        monkeypatch, hass=_Hass([]), stop_ok=stop_ok, observed=(None, False),
+    )
+    assert stops and stops[-1] == 0
+    assert ("transport_recovery_pending" not in state) is settled
+
+
 def test_tesla_rate_refusal_reason_reaches_the_start_caller(monkeypatch):
     """The reason a provider gave for not sending a rate survives the params copy."""
     async def home(*args, **kwargs):
@@ -20915,6 +21230,28 @@ def test_calibration_drain_still_respects_export_value_limit(monkeypatch):
     assert state["paused"] is True
     assert state["paused_by_export_price"] is True
     assert set_amps_calls[-1] == 0
+
+
+# --- Boost tells "refused before any writer" from "outcome unknown" ----------
+
+def test_boost_start_is_marked_submitted_only_when_a_writer_opens_a_start():
+    result = {}
+    actions._mark_boost_start_submitted({"_boost_start_result": result}, "stop", object())
+    actions._mark_boost_start_submitted({"_boost_start_result": result}, "start", None)
+    assert result == {}
+    actions._mark_boost_start_submitted({"_boost_start_result": result}, "start", object())
+    assert result == {"submitted": True}
+    actions._mark_boost_start_submitted({}, "start", object())  # not a Boost
+
+
+def test_every_tesla_writer_marks_boost_after_opening_its_journal_attempt():
+    source = (ROOT / "automations" / "actions.py").read_text()
+    for name in ("_run_ble_transport_command", "_run_teslemetry_bt_transport_command",
+                 "_run_native_tesla_service_command", "_run_modern_teslemetry_bluetooth"):
+        start = source.index(f"async def {name}(")
+        body = source[start:source.index("\nasync def ", start + 1)]
+        begin = body.index("await async_begin_attempt(")
+        assert body.index("_mark_boost_start_submitted(params, operation, ticket)") > begin, name
 
 
 # Phase 2: an unknown home-battery level is not 0%.
@@ -21151,3 +21488,71 @@ def test_unknown_home_battery_level_keeps_retrying_an_unconfirmed_floor_stop(mon
 
     assert set_amps_calls and set_amps_calls[-1] == 0
     assert state["paused"] is True
+
+
+# --- Scheduled: a car that stops mid-window and goes quiet is not held --------
+
+@pytest.mark.parametrize(("charging", "amps", "started_minutes_ago", "release"), [
+    ("Stopped", 0, 20, True),    # quiet stop after the 15-minute period
+    ("Stopped", 0, 10, False),   # still inside the quiet period
+    ("Charging", 0, 20, False),  # last known state is charging
+    ("Stopped", 8, 20, False),   # a reading shows draw
+])
+def test_scheduled_tesla_releases_after_a_quiet_stop(monkeypatch, charging, amps, started_minutes_ago, release):
+    from power_sync.automations.ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    vehicle = "5YJTEST00000000R4"
+    now = datetime.now(timezone.utc)
+    status_entity = "sensor.test_vehicle_charging"
+    current_entity = "sensor.test_vehicle_charger_current"
+    stale = now - timedelta(minutes=30)  # the car went to sleep
+    hass = _Hass([
+        _State(status_entity, charging, last_reported=stale),
+        _State(current_entity, str(amps), {"unit_of_measurement": "A"}, last_reported=stale),
+    ])
+    _install_native_ha_writer(hass, vehicle, status_entity, current_entity)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    physical_stop = AsyncMock()
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    entry = _Entry()
+    lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="scheduled")
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle: {
+        "active": True,
+        "current_amps": 32,
+        "last_start_command_at": datetime.now() - timedelta(minutes=started_minutes_ago),
+        "cancel_timer": Mock(),
+        "params": {"owner_mode": "scheduled", "charger_type": "tesla"},
+    }}
+
+    assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is release
+    assert get_ev_ownership(hass, entry, vehicle)[1] is (None if release else lease)
+    physical_stop.assert_not_awaited()  # releasing control never sends Stop
+
+
+@pytest.mark.parametrize(("state", "power", "release"), [
+    ("Stopped", "0", True), ("Charging", "0", False), ("Stopped", "6.5", False),
+])
+def test_scheduled_ble_only_releases_after_a_quiet_stop(monkeypatch, state, power, release):
+    from power_sync.automations.ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=30)
+    hass = _Hass([
+        _State("sensor.car_charging_state", state, last_reported=stale),
+        _State("sensor.car_charge_power", power, {"unit_of_measurement": "kW"}, last_reported=stale),
+    ])
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", AsyncMock())
+    entry = _Entry()
+    entry.options = {"ev_provider": actions.EV_PROVIDER_TESLA_BLE, "tesla_ble_entity_prefix": "car"}
+    vehicle = "ble_car"
+    lease = claim_ev_ownership(hass, entry, vehicle, owner_mode="scheduled")
+    actions._dynamic_ev_state[entry.entry_id] = {vehicle: {
+        "active": True,
+        "current_amps": 32,
+        "last_start_command_at": datetime.now() - timedelta(minutes=20),
+        "params": {"owner_mode": "scheduled", "charger_type": "tesla"},
+    }}
+
+    assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is release
+    assert get_ev_ownership(hass, entry, vehicle)[1] is (None if release else lease)

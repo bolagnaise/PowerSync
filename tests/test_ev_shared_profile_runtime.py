@@ -175,7 +175,7 @@ def test_explicit_external_session_actions_reach_non_tesla_runtime_boundary():
         state = NS(is_charging=False, last_decision="waiting", last_decision_reason="")
         stop_calls: list[dict] = []
 
-        async def decision(*_args):
+        async def decision(*_args, **_kwargs):
             return False, "price outside opportunity window", "opportunity"
 
         async def stop(*_args, **kwargs):

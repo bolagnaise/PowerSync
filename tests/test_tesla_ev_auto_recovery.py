@@ -356,7 +356,7 @@ async def test_retired_runtime_cannot_save_late_passive_evidence(case, monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("variant", ["new_session", "producer_changed", "no_owner", "foreign_owner", "cleanup_only", "revoked", "save_failed", "finite_cleanup", "owner_changed_during_save", "producer_changed_during_save"])
 async def test_new_plan_reclaims_only_completed_same_producer_session_route(case, monkeypatch, variant):
-    """Completed history must not strand a fresh owned plan on its old lease."""
+    """Completed history must not strand a fresh plan on its old lease."""
     import ast
     from collections.abc import Mapping
     from pathlib import Path
@@ -403,8 +403,42 @@ async def test_new_plan_reclaims_only_completed_same_producer_session_route(case
         "_tesla_transport_authority": lambda *a, **k: lambda: variant != "revoked"}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), scope)
     route = await scope["_tesla_transport_route"](c.hass, c.entry, {"vehicle_vin": VIN_A}, "start")
-    assert route["kind"] == ("ha" if variant == "new_session" else "blocked")
+    if variant == "no_owner":
+        # Nobody owns the car any more and nothing is unresolved: the ended
+        # session's pin is released so the next command routes normally.
+        assert route is None
+        assert c.runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["route"] is None
+    else:
+        assert route["kind"] == ("ha" if variant == "new_session" else "blocked")
     if variant == "new_session":
         assert route["session_scope"]["session_id"] == "new-session"
     assert c.runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"] == history
+    assert not c.hass.services.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocker", ["none", "foreign_owner", "unresolved", "denied"])
+async def test_ended_native_session_pin_is_released_only_when_nothing_holds_it(case, blocker):
+    """A restart that clears ownership must not leave the native pin blocking forever."""
+    c = case
+    await worker(c).async_tick()
+    c.owners[VIN_A] = {"owner": "powersync", "owner_mode": "smart_schedule", "session_id": "old"}
+    ticket = await recovery.async_begin_attempt(c.hass, c.entry, VIN_A,
+        {"kind": "ha"}, "start", "switch.fallback")
+    assert ticket and await recovery.async_finish_attempt(ticket, "accepted_unconfirmed")
+    c.owners.pop(VIN_A)
+    if blocker == "foreign_owner":
+        c.owners[VIN_A] = {"owner": "external", "owner_mode": "tesla_app", "session_id": "x"}
+    elif blocker == "unresolved":
+        c.runtime[recovery.RECOVERY_KEY]["vehicles"][VIN_A]["attempts"]["u"] = {
+            "attempt_id": "u", "route": {"kind": "ha"}, "outcome": "sent_unknown"}
+    assert recovery.get_vehicle_route(c.hass, c.entry, VIN_A)["kind"] == "blocked"
+    released = await recovery.async_release_ended_native_route(
+        c.hass, c.entry, VIN_A, authorize=lambda: blocker != "denied")
+    assert released is (blocker == "none")
+    if blocker == "none":
+        assert recovery.get_vehicle_route(c.hass, c.entry, VIN_A) is None
+        assert c.store.value is not None
+    else:
+        assert recovery.get_vehicle_route(c.hass, c.entry, VIN_A)["kind"] == "blocked"
     assert not c.hass.services.calls
