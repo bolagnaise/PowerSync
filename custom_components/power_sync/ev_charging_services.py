@@ -26,8 +26,13 @@ def _default_not_home_until(now):
     return until if until > now + timedelta(hours=1) else until + timedelta(days=1)
 
 
-async def async_set_ev_return(hass, entry, vehicle_id, mode, when=None):
-    """Record the owner's answer about when one away car is coming home."""
+async def async_set_ev_return(hass, entry, vehicle_id, mode, when=None, question_id=None):
+    """Record the owner's answer about when one away car is coming home.
+
+    ``question_id`` marks an answer tapped on a notification. It is applied
+    only to the newest unanswered, unexpired question for the car's current
+    trip, so a stale notification cannot change tonight's plan.
+    """
     from homeassistant.util import dt as dt_util
     from .optimization.ev_return import MODE_NOT_HOME
     from .optimization.ev_return_inputs import (
@@ -52,11 +57,23 @@ async def async_set_ev_return(hass, entry, vehicle_id, mode, when=None):
         raise HomeAssistantError(str(err)) from err
     lock = entry_data.setdefault("ev_return_lock", asyncio.Lock())
     async with lock:
+        prompts = None
+        if question_id is not None:
+            from .optimization.ev_return_prompt import PROMPTS_KEY, answer_rejection
+
+            prompts = dict(store._data.get(PROMPTS_KEY) or {})
+            record = prompts.get(vehicle_id)
+            reason = answer_rejection(record, str(question_id), now)
+            if reason:
+                raise HomeAssistantError(reason)
+            prompts[vehicle_id] = {**record, "answered_at": now.isoformat(), "answer": mode}
         overrides = load_overrides(store)
         if override is None:
             overrides.pop(vehicle_id, None)
         else:
             overrides[vehicle_id] = override
+        if prompts is not None:
+            store._data[PROMPTS_KEY] = prompts
         await async_save_overrides(store, overrides)
     coordinator = entry_data.get("optimization_coordinator")
     refresh = getattr(coordinator, "_schedule_settings_reoptimization", None)
@@ -156,7 +173,7 @@ def register_services(hass):
             try:
                 return await async_set_ev_return(
                     hass, entry, call.data["vehicle_id"], call.data["mode"],
-                    call.data.get("time"),
+                    call.data.get("time"), call.data.get("question_id"),
                 )
             except HomeAssistantError:
                 raise
@@ -170,6 +187,7 @@ def register_services(hass):
                 vol.Required("vehicle_id"): cv.string,
                 vol.Required("mode"): vol.In(("auto", "not_home", "home_at")),
                 vol.Optional("time"): cv.datetime,
+                vol.Optional("question_id"): cv.string,
             }),
             supports_response=SupportsResponse.OPTIONAL,
         )
