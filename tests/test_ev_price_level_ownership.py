@@ -7041,7 +7041,7 @@ def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake
                 "load_power": 1000,
                 "grid_power": -1000,
             },
-            current_price_cents=0,
+            current_price_cents=10,  # paid: free periods use a free-grid session
         )
     )
 
@@ -7257,17 +7257,28 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
 
 
 @pytest.mark.parametrize(
+    "priority",
+    (
+        ev_planner.ChargingPriority.SOLAR_PREFERRED,
+        ev_planner.ChargingPriority.SOLAR_ONLY,
+        ev_planner.ChargingPriority.COST_OPTIMIZED,
+    ),
+)
+@pytest.mark.parametrize(
     ("price", "grid_import_limited", "demand_blocked", "battery_power", "grid_power", "source"),
     (
         (0, False, False, -16000, 7500, "grid_free"),
-        (0, False, False, -2000, -6500, "solar_surplus"),
+        # Ticket 158: spare solar during a free period must not throttle the
+        # car to solar tracking while free grid headroom goes unused.
+        (0, False, False, -2000, -6500, "grid_free"),
+        (0, False, False, -300, -2000, "grid_free"),
         (15, False, False, -16000, 7500, "solar_surplus"),
         (0, True, False, -16000, 7500, "solar_surplus"),
         (0, False, True, -16000, 7500, "solar_surplus"),
     ),
 )
 def test_solar_preferred_uses_free_grid_if_battery_leaves_no_ev_surplus(
-    monkeypatch, price, grid_import_limited, demand_blocked, battery_power, grid_power, source,
+    monkeypatch, priority, price, grid_import_limited, demand_blocked, battery_power, grid_power, source,
 ):
     now = datetime(2026, 11, 21, 12, 46, tzinfo=timezone.utc)
     monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now.replace(tzinfo=None))
@@ -7299,7 +7310,7 @@ def test_solar_preferred_uses_free_grid_if_battery_leaves_no_ev_surplus(
         vehicle_id=VIN,
         display_name="Test Tesla",
         target_soc=70,
-        priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+        priority=priority,
         limit_grid_import=grid_import_limited,
         min_charge_amps=1,
     )
@@ -7323,7 +7334,7 @@ def test_solar_preferred_uses_free_grid_if_battery_leaves_no_ev_surplus(
     )
 
     asyncio.run(executor._evaluate_vehicle(VIN, settings, {
-        "battery_soc": 100 if battery_power == -2000 else 87,
+        "battery_soc": 100 if battery_power in (-2000, -300) else 87,
         "solar_power": 11600,
         "load_power": 3100,
         "battery_power": battery_power,
@@ -7410,7 +7421,7 @@ def test_auto_schedule_switches_active_controller_when_source_family_changes(
                 "load_power": 1000,
                 "grid_power": -1000,
             },
-            current_price_cents=0,
+            current_price_cents=10,  # paid: free periods use a free-grid session
         )
     )
 
@@ -7543,7 +7554,7 @@ def test_auto_schedule_reconciles_failed_source_family_switch(
                 "load_power": 1000,
                 "grid_power": -1000,
             },
-            current_price_cents=0,
+            current_price_cents=10,  # paid: free periods use a free-grid session
         )
     )
 
@@ -7681,7 +7692,7 @@ def test_auto_schedule_active_solar_session_delegates_low_surplus_stop(
                 "load_power": 4700,
                 "grid_power": -2970,
             },
-            current_price_cents=0,
+            current_price_cents=10,  # paid: free periods use a free-grid session
         )
     )
 
@@ -7755,7 +7766,7 @@ def test_auto_schedule_solar_allows_strict_surplus_below_battery_floor(monkeypat
                 "load_power": 1000,
                 "grid_power": -4000,
             },
-            current_price_cents=0,
+            current_price_cents=10,  # paid: free periods use a free-grid session
         )
     )
 

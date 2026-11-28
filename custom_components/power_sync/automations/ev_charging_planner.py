@@ -7198,10 +7198,14 @@ class AutoScheduleExecutor:
             ):
                 should_charge, reason, source = True, state.last_decision_reason, held_source
 
+        # An active free-grid period is used by every Smart Schedule strategy.
+        # Solar-first plans can store that period as a forecast solar window;
+        # following live surplus there would throttle the car to spare solar
+        # while guaranteed free grid headroom goes unused. Keep solar tracking
+        # only when grid import is limited or blocked for this interval.
         if (
             should_charge
             and source == "solar_surplus"
-            and effective_priority == ChargingPriority.SOLAR_PREFERRED
             and current_price_cents is not None
             and current_price_cents <= FREE_GRID_PRICE_EPSILON_CENTS
             and not effective_limit_grid
@@ -7217,12 +7221,11 @@ class AutoScheduleExecutor:
                 solar_config,
                 self.hass,
             )
-            if available_surplus_kw < settings.get_min_surplus_kw():
-                source = "grid_free"
-                reason = (
-                    f"Free grid power ({current_price_cents:.1f}c/kWh); "
-                    f"usable solar surplus is {available_surplus_kw:.1f} kW"
-                )
+            source = "grid_free"
+            reason = (
+                f"Free grid power ({current_price_cents:.1f}c/kWh); "
+                f"usable solar surplus is {available_surplus_kw:.1f} kW"
+            )
 
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
