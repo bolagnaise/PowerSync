@@ -21623,3 +21623,92 @@ def test_ble_amps_max_below_configured_current_warns_once(monkeypatch, caplog):
     warnings = [r for r in caplog.records if "charging_amps_max" in r.getMessage()]
     assert len(warnings) == 1
     assert "at most 15A" in warnings[0].getMessage()
+
+
+def _stub_smart_schedule_switch_environment(monkeypatch):
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    planner.is_ev_plugged_in = AsyncMock(return_value=True)
+    planner.get_ev_battery_level = AsyncMock(return_value=60.0)
+    planner.discover_all_tesla_vehicles = AsyncMock(return_value=[])
+    planner._resolve_unspecified_tesla_start_vin = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", planner)
+    monkeypatch.setattr(actions, "_initial_smart_schedule_battery_target_amps",
+                        lambda *_a, **_k: 16)
+
+
+def _smart_schedule_switch_params(vehicle_id, owner_mode):
+    solar = owner_mode == "smart_schedule_solar_surplus"
+    return {
+        "vehicle_vin": vehicle_id, "charger_type": "tesla",
+        "dynamic_mode": "solar_surplus" if solar else "battery_target",
+        "owner_mode": owner_mode, "max_charge_amps": 32,
+        "allow_ownership_takeover": True,
+    }
+
+
+@pytest.mark.parametrize("old_mode,new_mode", [
+    ("smart_schedule", "smart_schedule_solar_surplus"),
+])
+def test_smart_schedule_switch_keeps_the_running_charge(monkeypatch, old_mode, new_mode):
+    """Live 2026-11-28 14:00: the free-grid window ended and Smart Schedule switched to solar.
+
+    The switch tore the grid session down with a physical Stop. The BLE Stop
+    could not be confirmed, the bridge was held, and the car sat stopped with
+    5.6 kW of spare solar. Switching between Smart Schedule's own controllers
+    while the car charges must only change the controller.
+    """
+    from power_sync.automations import ev_ownership
+
+    hass, entry, vin, old_state, stop, start, _set_amps = (
+        _charging_smart_schedule_session_for_boost(monkeypatch, owner_mode=old_mode))
+    _stub_smart_schedule_switch_environment(monkeypatch)
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, _smart_schedule_switch_params(vin, new_mode))) is True
+
+    stop.assert_not_awaited()
+    start.assert_not_awaited()
+    state = actions._dynamic_ev_state[entry.entry_id][vin]
+    assert state["params"]["owner_mode"] == new_mode
+    assert state["charging_started"] is True
+    if new_mode == "smart_schedule_solar_surplus":
+        # The solar controller continues from the running current.
+        assert state["current_amps"] == 16
+        assert state["external_start_detection_armed"] is False
+    _, lease = ev_ownership.get_ev_ownership(hass, entry, vin)
+    assert lease["owner_mode"] == new_mode
+
+
+@pytest.mark.parametrize("case", ["solar_to_grid", "pinned_native_route"])
+def test_smart_schedule_switch_keeps_stop_then_start_when_adoption_is_unsafe(monkeypatch, case):
+    """Codex #229: solar->grid validates headroom after release; a native route is lease-scoped."""
+    from power_sync import tesla_ev_recovery
+
+    old_mode = "smart_schedule_solar_surplus" if case == "solar_to_grid" else "smart_schedule"
+    new_mode = "smart_schedule" if case == "solar_to_grid" else "smart_schedule_solar_surplus"
+    hass, entry, vin, _old_state, stop, _start, _set_amps = (
+        _charging_smart_schedule_session_for_boost(monkeypatch, owner_mode=old_mode))
+    _stub_smart_schedule_switch_environment(monkeypatch)
+    if case == "pinned_native_route":
+        monkeypatch.setattr(tesla_ev_recovery, "get_vehicle_route", Mock(return_value={
+            "kind": "ha", "entity_id": "switch.car_charge",
+            "session_scope": {"owner": "powersync", "owner_mode": "smart_schedule"},
+        }))
+
+    asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, _smart_schedule_switch_params(vin, new_mode)))
+
+    stop.assert_awaited()
+
+
+def test_smart_schedule_switch_without_live_charging_keeps_stop_then_start(monkeypatch):
+    """No adoption without live charging evidence: the existing takeover stays."""
+    hass, entry, vin, _old_state, stop, _start, _set_amps = (
+        _charging_smart_schedule_session_for_boost(
+            monkeypatch, owner_mode="smart_schedule", physically_charging=False))
+    _stub_smart_schedule_switch_environment(monkeypatch)
+
+    asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, _smart_schedule_switch_params(vin, "smart_schedule_solar_surplus")))
+
+    stop.assert_awaited_once()
