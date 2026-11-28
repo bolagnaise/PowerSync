@@ -7846,6 +7846,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Smart EV charging is disabled or has never been configured.
             await self._refresh_ev_forecast_inputs()
             await self._refresh_historical_ev_forecasts()
+            await self._refresh_ev_return_decisions()
             run.check_current()
             historical_ev_generation = getattr(self, "_historical_ev_generation", 0)
 
@@ -9714,9 +9715,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             plans = []
             policy_diagnostics: dict[str, dict[str, Any]] = {}
             for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
-                historical_plan = ((getattr(self, "_historical_ev_plans", {}) or {}).get(vehicle_id)
-                                   if getattr(self, "_use_historical_ev_data", False) else None)
-                charging_plan = historical_plan or getattr(state, "current_plan", None)
+                from .ev_return import select_home_demand_plan
+
+                charging_plan, plan_is_forecast = select_home_demand_plan(
+                    (getattr(self, "_ev_return_decisions", None) or {}).get(str(vehicle_id)),
+                    current_plan=getattr(state, "current_plan", None),
+                    historical_plan=((getattr(self, "_historical_ev_plans", {}) or {}).get(vehicle_id)
+                                     if getattr(self, "_use_historical_ev_data", False) else None),
+                    return_plan=(getattr(self, "_ev_return_plans", None) or {}).get(vehicle_id),
+                )
                 if charging_plan is None:
                     continue
                 settings = (getattr(executor, "_settings", {}) or {}).get(vehicle_id)
@@ -10121,7 +10128,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         initially_charging=bool(
                             getattr(state, "is_charging", False)
                         ),
-                        forecast_only=historical_plan is not None,
+                        forecast_only=plan_is_forecast,
                     )
                 )
             # Hand the solver one plan per vehicle. Combining them into a
@@ -18836,6 +18843,134 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Historical EV forecast unavailable: %s", err)
 
     def _historical_ev_forecast_for(self, identifier):
+        """Expected arrival for an away car, or None when it adds no demand.
+
+        An owner answer or navigation ETA replaces the learned weekday trip,
+        and a car that is away with no expected return contributes nothing.
+        """
+        lookup = getattr(self, "_ev_return_decision_for", None)
+        decision = lookup(identifier) if lookup else None
+        if decision is not None and decision.away:
+            if not decision.include:
+                return None
+            if decision.arrival is not None:
+                return decision.arrival
+        return self._learned_ev_forecast_for(identifier)
+
+    def _ev_return_decision_for(self, identifier):
+        decisions = getattr(self, "_ev_return_decisions", None) or {}
+        if not decisions or identifier is None:
+            return None
+        direct = decisions.get(str(identifier))
+        if direct is not None:
+            return direct
+        canonical = self._canonical_ev_loadpoint_ids([str(identifier), *decisions])
+        target = canonical.get(str(identifier), str(identifier))
+        return next((value for key, value in decisions.items()
+                     if canonical.get(key, key) == target), None)
+
+    def _ev_return_suppressed_vins(self, vins) -> frozenset[str]:
+        """Tesla-owned schedules of away cars that add no home demand."""
+        suppressed = set()
+        for vin in vins:
+            decision = self._ev_return_decision_for(vin)
+            if decision is not None and decision.away and not decision.include:
+                suppressed.add(str(vin))
+        return frozenset(suppressed)
+
+    async def _refresh_ev_return_decisions(self) -> None:
+        """Decide, per away car, whether and from when it counts as home demand."""
+        self._ev_return_decisions = {}
+        self._ev_return_plans = {}
+        self._ev_return_status = {}
+        try:
+            from ..automations.ev_charging_planner import (
+                AutoScheduleState, get_auto_schedule_executor, get_ev_location,
+            )
+            from .ev_return import EVReturnTelemetry, resolve_ev_return
+            from .ev_return_inputs import (
+                async_save_overrides, load_overrides, read_return_telemetry,
+            )
+
+            executor = get_auto_schedule_executor()
+            if executor is not None and getattr(executor, "config_entry", None) is not self._entry:
+                executor = None
+            entry_data = self.hass.data.get("power_sync", {}).get(self._entry.entry_id, {})
+            store = entry_data.get("automation_store")
+            overrides = load_overrides(store)
+            remaining = dict(overrides)
+            now = dt_util.now()
+            identifiers: dict[str, str | None] = {}
+            settings = (getattr(executor, "_settings", {}) or {}) if executor else {}
+            for key, cfg in settings.items():
+                if getattr(cfg, "enabled", False):
+                    identifiers[str(key)] = executor._resolve_vehicle_vin(key) or str(key)
+            reader = getattr(self, "_tesla_schedule_reader", None)
+            for vin in (getattr(reader, "cache", {}) or {}):
+                if str(vin) not in identifiers.values():
+                    identifiers[str(vin)] = str(vin)
+            for key in overrides:
+                if key not in identifiers and key not in identifiers.values():
+                    identifiers[key] = key
+
+            for vehicle_id, vin in identifiers.items():
+                override_key = next((key for key in (vehicle_id, vin) if key in remaining), None)
+                override = remaining.get(override_key) if override_key else None
+                try:
+                    location = await get_ev_location(self.hass, self._entry, vin)
+                except Exception:
+                    location = "unknown"
+                # The answer is about one trip: arrival home or expiry ends it.
+                if override is not None and (location == "home" or not override.active(now)):
+                    remaining.pop(override_key, None)
+                    override = None
+                away = location not in ("home", "unknown", "unavailable")
+                if not away:
+                    continue
+                soc = None
+                if vehicle_id in settings:
+                    try:
+                        soc = await executor._get_vehicle_soc(vehicle_id)
+                    except Exception:
+                        soc = None
+                telemetry = read_return_telemetry(self.hass, vin, soc)
+                decision = resolve_ev_return(
+                    now=now, away=True, telemetry=telemetry,
+                    home_lat=self.hass.config.latitude, home_lon=self.hass.config.longitude,
+                    override=override,
+                    learned_available=self._learned_ev_forecast_for(vehicle_id) is not None,
+                )
+                self._ev_return_decisions[vehicle_id] = decision
+                if vin and vin != vehicle_id:
+                    self._ev_return_decisions[str(vin)] = decision
+                status = decision.to_dict()
+                status["location"] = location
+                if override is not None:
+                    status["owner_answer"] = override.to_dict()
+                self._ev_return_status[vehicle_id] = status
+                cfg = settings.get(vehicle_id)
+                if (decision.arrival is not None and cfg is not None
+                        and getattr(self, "_ev_integration_enabled", False)):
+                    # Detached copy: _regenerate_plan updates only this state.
+                    state = AutoScheduleState(vehicle_id=vehicle_id)
+                    await executor._regenerate_plan(
+                        vehicle_id, cfg, state, current_soc=decision.arrival.soc,
+                        charger_capability={"capability_known": False},
+                        available_from=decision.arrival.arrival,
+                    )
+                    if state.current_plan is not None:
+                        self._ev_return_plans[vehicle_id] = state.current_plan
+
+            if remaining != overrides and store is not None:
+                await async_save_overrides(store, remaining)
+        except Exception as err:
+            # Fail open to the previous behaviour rather than dropping demand.
+            self._ev_return_decisions = {}
+            self._ev_return_plans = {}
+            self._ev_return_status = {"error": str(err)}
+            _LOGGER.debug("EV return decisions unavailable: %s", err)
+
+    def _learned_ev_forecast_for(self, identifier):
         forecasts = getattr(self, "_historical_ev_forecasts", {}) or {}
         if not getattr(self, "_use_historical_ev_data", False):
             return None
@@ -18901,7 +19036,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             latitude=self.hass.config.latitude, longitude=self.hass.config.longitude,
             capacities=capacities, power_limits=power_limits, now=dt_util.now(),
             native_solar_settings=holds,
-            excluded_vins=excluded_vins(self.hass, self._entry.entry_id),
+            excluded_vins=(excluded_vins(self.hass, self._entry.entry_id)
+                           | getattr(self, "_ev_return_suppressed_vins", lambda _: frozenset())(reader.cache)),
             charging_parameters=charging_parameters,
             arrival_forecasts={vin: forecast for vin in reader.cache
                               if (forecast := getattr(self, "_historical_ev_forecast_for", lambda _: None)(vin)) is not None},
@@ -19185,11 +19321,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ev_load_by_vehicle: dict[str, list[float]] = {}
 
         for vehicle_id, state in states.items():
-            historical_plans = getattr(self, "_historical_ev_plans", {}) or {}
-            historical_plan = historical_plans.get(vehicle_id) if getattr(
-                self, "_use_historical_ev_data", False
-            ) else None
-            plan = historical_plan or getattr(state, "current_plan", None)
+            from .ev_return import select_home_demand_plan
+
+            plan, _forecast_only = select_home_demand_plan(
+                (getattr(self, "_ev_return_decisions", None) or {}).get(str(vehicle_id)),
+                current_plan=getattr(state, "current_plan", None),
+                historical_plan=((getattr(self, "_historical_ev_plans", {}) or {}).get(vehicle_id)
+                                 if getattr(self, "_use_historical_ev_data", False) else None),
+                return_plan=(getattr(self, "_ev_return_plans", None) or {}).get(vehicle_id),
+            )
             if not plan or not plan.windows:
                 continue
 
@@ -22093,6 +22233,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if native_forecast:
             data["tesla_schedule_forecast"] = native_forecast
         data["historical_ev_data"] = dict(getattr(self, "_historical_ev_status", {"source": "disabled"}))
+        data["ev_return"] = dict(getattr(self, "_ev_return_status", {}) or {})
 
         # Use actual tariff prices for display (not LP-adjusted values)
         disp_import = self._last_display_import_prices or self._last_import_prices
@@ -22774,6 +22915,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if native_forecast:
             data["tesla_schedule_forecast"] = native_forecast
         data["historical_ev_data"] = dict(getattr(self, "_historical_ev_status", {"source": "disabled"}))
+        data["ev_return"] = dict(getattr(self, "_ev_return_status", {}) or {})
 
         # Add daily cost breakdown (actual + predicted remaining)
         pred_remaining, baseline_remaining = self._get_predicted_cost_to_midnight()

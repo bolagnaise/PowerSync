@@ -1271,6 +1271,45 @@ set_price_level_charging:
       selector:
         boolean:
 
+set_ev_return:
+  name: Set when an away car is coming home
+  description: >-
+    Tell the optimizer whether an away car will be home for tonight's charging.
+    "Not home" removes its home charging demand until the time given (default
+    10:00 the next morning). "Home at" plans its charging from that time. "Auto"
+    clears the answer. The answer also clears when the car arrives home.
+    Never starts or stops charging by itself.
+  fields:
+    entry_id:
+      name: PowerSync integration
+      required: true
+      selector:
+        config_entry:
+          integration: power_sync
+    vehicle_id:
+      name: Vehicle ID
+      description: Smart Schedule vehicle ID or VIN.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Answer
+      required: true
+      selector:
+        select:
+          options:
+            - label: Automatic
+              value: auto
+            - label: Not home until
+              value: not_home
+            - label: Home at
+              value: home_at
+    time:
+      name: Time
+      description: Required for "Home at"; optional for "Not home".
+      required: false
+      selector:
+        datetime:
 set_smart_schedule_charging:
   name: Set Smart Schedule EV charging
   description: >-
