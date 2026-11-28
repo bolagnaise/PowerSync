@@ -176,14 +176,13 @@ def test_loadpoint_site_surplus_uses_normalized_total_ev_power():
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "_calculate_solar_surplus"
+            and node.func.id == "_site_surplus_kw"
         )
     ]
 
     assert len(calls) == 1
-    assert len(calls[0].args) >= 2
-    assert isinstance(calls[0].args[1], ast.Name)
-    assert calls[0].args[1].id == "total_ev_power_kw"
+    assert isinstance(calls[0].args[2], ast.Name)
+    assert calls[0].args[2].id == "total_ev_power_kw"
     assert any(
         isinstance(node, ast.Assign)
         and any(
@@ -194,6 +193,112 @@ def test_loadpoint_site_surplus_uses_normalized_total_ev_power():
         and node.lineno < calls[0].lineno
         for node in ast.walk(method)
     )
+    # The display snapshot must not feed surplus arithmetic directly.
+    assert "_calculate_solar_surplus" not in ast.unparse(method)
+
+
+def _extract_site_surplus(monkeypatch, calculate):
+    import sys
+    import types
+    from datetime import datetime, timezone
+
+    root = INIT_PATH.parent
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(root)]
+    automations = types.ModuleType("power_sync.automations")
+    automations.__path__ = [str(root / "automations")]
+    monkeypatch.setitem(sys.modules, "power_sync", package)
+    monkeypatch.setitem(sys.modules, "power_sync.automations", automations)
+    monkeypatch.delitem(sys.modules, "power_sync.automations.live_status", raising=False)
+    actions = types.ModuleType("power_sync.automations.actions")
+    actions._calculate_solar_surplus = calculate
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
+
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_site_surplus_kw"
+    )
+    module = ast.Module(body=[method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    now = datetime(2026, 11, 28, 8, 26, tzinfo=timezone.utc)
+    namespace = {
+        "DOMAIN": "power_sync",
+        "__name__": "power_sync._status_view",
+        "__package__": "power_sync",
+        "dt_util": SimpleNamespace(utcnow=lambda: now),
+    }
+    exec(compile(module, str(INIT_PATH), "exec"), namespace)
+    return namespace["_site_surplus_kw"], now
+
+
+def _surplus_site(coordinators):
+    return (
+        SimpleNamespace(data={"power_sync": {"entry-1": coordinators}}),
+        SimpleNamespace(entry_id="entry-1"),
+    )
+
+
+def test_stale_site_telemetry_reports_no_spare_solar_at_night(monkeypatch):
+    """Live 2026-11-28 18:26: 5.4 kW "solar to spare" while the battery fed the car.
+
+    The display snapshot took a coordinator whose last refresh had failed and
+    paired its retained battery sample with the live 7.6 kW EV draw.
+    """
+    from datetime import timedelta
+
+    seen = []
+
+    def calculate(live_status, ev_power_kw, config):
+        seen.append(live_status)
+        return 5.4
+
+    site_surplus, now = _extract_site_surplus(monkeypatch, calculate)
+    retained = SimpleNamespace(
+        last_update_success=False,
+        last_update_success_time=now - timedelta(minutes=20),
+        update_interval=timedelta(seconds=30),
+        data={"solar_power": 0.0, "grid_power": 0.0, "battery_power": 2.2},
+    )
+    hass, entry = _surplus_site({"tesla_coordinator": retained})
+
+    assert site_surplus(hass, entry, 7.6, {}) == 0.0
+    assert seen == []
+
+
+def test_spare_solar_uses_the_fresh_site_sample(monkeypatch):
+    from datetime import timedelta
+
+    seen = []
+
+    def calculate(live_status, ev_power_kw, config):
+        seen.append((live_status, ev_power_kw))
+        return 0.0
+
+    site_surplus, now = _extract_site_surplus(monkeypatch, calculate)
+    fresh = SimpleNamespace(
+        last_update_success=True,
+        last_update_success_time=now - timedelta(seconds=10),
+        update_interval=timedelta(seconds=30),
+        data={
+            "solar_power": 0.0,
+            "grid_power": 0.0,
+            "battery_power": 8.87,
+            "ev_power": 7.6,
+            "ev_power_at_site_sample": 7.6,
+            "is_curtailed": True,
+        },
+    )
+    hass, entry = _surplus_site({"tesla_coordinator": fresh})
+
+    assert site_surplus(hass, entry, 7.6, {}) == 0.0
+    live_status, ev_power_kw = seen[0]
+    assert live_status["battery_power"] == pytest.approx(8870)
+    # The drift sample reaches the calculation, as it does for the controllers.
+    assert live_status["ev_power_at_site_sample"] == pytest.approx(7600)
+    assert live_status["is_curtailed"] is True
+    assert ev_power_kw == 7.6
 
 
 def test_loadpoint_status_preserves_curtailed_site_state_for_surplus_calculation():
@@ -203,8 +308,8 @@ def test_loadpoint_status_preserves_curtailed_site_state_for_surplus_calculation
     assert "data.get('is_curtailed', False) is True" in snapshot_source
     assert "'is_curtailed': is_curtailed" in snapshot_source
 
-    method_source = ast.unparse(_get_method())
-    assert "'is_curtailed': site['is_curtailed']" in method_source
+    # Surplus reads curtailment from the shared fresh live status (see
+    # test_spare_solar_uses_the_fresh_site_sample), not this display dict.
 
     site_snapshot = _extract_site_snapshot()
     base_data = {
