@@ -31,6 +31,16 @@ GUIDE_URL = (
 )
 
 
+# Entities only the PedroKTFC firmware family publishes. The companion update
+# (and its car-limit sensor) exists for that family only; yoziru bridges use a
+# different adapter, so a missing sensor there is not a reason to migrate.
+PEDRO_FAMILY_SUFFIXES = (
+    "number.{prefix}_poll_data_period",
+    "button.{prefix}_get_charge_schedules",
+    "sensor.{prefix}_charge_power_calculated",
+)
+
+
 @dataclass(frozen=True)
 class BridgeHealth:
     prefix: str
@@ -38,10 +48,11 @@ class BridgeHealth:
     reports_car_limit: bool
     amps_max: float | None
     car_limit: float | None
+    pedro_family: bool = False
 
     @property
     def needs_update(self) -> bool:
-        return self.present and not self.reports_car_limit
+        return self.present and self.pedro_family and not self.reports_car_limit
 
     @property
     def capped(self) -> bool:
@@ -72,20 +83,27 @@ def bridge_health(hass: Any, prefix: str, registry_ids: Iterable[str]) -> Bridge
     amps_max = _finite(getattr(amps_state, "attributes", {}).get("max")) if amps_state else None
     limit_state = hass.states.get(limit_entity)
     car_limit = _finite(getattr(limit_state, "state", None)) if limit_state else None
+    pedro_family = any(
+        pattern.format(prefix=prefix) in ids
+        or hass.states.get(pattern.format(prefix=prefix)) is not None
+        for pattern in PEDRO_FAMILY_SUFFIXES
+    )
     return BridgeHealth(
         prefix=prefix,
         present=present,
         reports_car_limit=limit_entity in ids or limit_state is not None,
         amps_max=amps_max,
         car_limit=car_limit,
+        pedro_family=pedro_family,
     )
 
 
 def configured_prefixes(config: Mapping[str, Any], hass: Any = None) -> list[str]:
-    """BLE bridge prefixes, resolving a single unmapped bridge by discovery.
+    """BLE bridge prefixes as the charging paths resolve them.
 
-    Installer-image bridges are named after their MAC (``tesla_ble_ab12cd``),
-    so the default ``tesla_ble`` prefix alone would miss them.
+    A single unmapped bridge may be discovered under a different prefix than
+    the configured one (``tesla_ble`` resolving to ``garage_ble``, or an
+    installer-image bridge named after its MAC, ``tesla_ble_ab12cd``).
     """
     from .tesla_ble_mapping import configured_ble_prefixes, resolve_ble_prefixes
 
@@ -134,7 +152,7 @@ async def async_check_tesla_ble_bridges(hass: Any, entry: Any) -> list[BridgeHea
                 },
                 learn_more_url=GUIDE_URL,
             )
-        elif health.present and health.reports_car_limit:
+        elif health.present and (health.reports_car_limit or not health.pedro_family):
             # Only clear once the bridge proves it has the new firmware; a
             # missing bridge keeps any earlier notice.
             ir.async_delete_issue(hass, DOMAIN, update_id)
