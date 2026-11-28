@@ -5645,6 +5645,19 @@ async def _set_ev_charging_amps_ble(
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
             )
+        if fallback_amps is not None and _tesla_ble_bridge_current_satisfied(
+            hass, ble_prefix, amps_entity, fallback_amps
+        ):
+            # The first request was rejected before the provider saw it, and
+            # the car already reports the range limit. Writing that unchanged
+            # value could never be read back and would leave an unknown rate
+            # command blocking every later start.
+            _LOGGER.info(
+                "Tesla BLE %s is already at its %dA range limit; requested %dA "
+                "was not sent",
+                ble_prefix, fallback_amps, capped_amps,
+            )
+            return True
         if fallback_amps is not None:
             try:
                 _tesla_ble_mark_mutation_prewrite()

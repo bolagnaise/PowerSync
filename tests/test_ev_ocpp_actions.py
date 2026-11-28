@@ -21556,3 +21556,46 @@ def test_scheduled_ble_only_releases_after_a_quiet_stop(monkeypatch, state, powe
 
     assert asyncio.run(actions._release_stopped_scheduled_tesla(hass, entry, vehicle)) is release
     assert get_ev_ownership(hass, entry, vehicle)[1] is (None if release else lease)
+
+
+def test_ble_range_fallback_to_the_current_limit_is_not_rewritten(monkeypatch):
+    """Live 2026-11-28: 32 A was range-rejected, then 15 A was written to a car at 15 A.
+
+    The bridge entity's max was 15 A. The configured 32 A override was
+    rejected by Home Assistant before the provider saw it, and the fallback
+    then re-wrote the unchanged 15 A, which ESPHome never reports back. The
+    unknown rate blocked every Smart Schedule start.
+    """
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("number.car_charging_amps", "15", {"min": 1, "max": 15}),
+        _State("sensor.car_current_limit", "15", last_updated=now - timedelta(minutes=10)),
+        _State("sensor.car_charging_state", "Charging", last_updated=now - timedelta(minutes=10)),
+        _State("sensor.car_last_update", "Sat Nov 28 12:46:21 2026",
+               last_updated=now - timedelta(seconds=20)),
+    ])
+
+    class _RejectRange(_Services):
+        async def async_call(self, domain, service, data, blocking=True):
+            self.calls.append((domain, service, data))
+            if data.get("value") == 32:
+                raise _native_number_range_error(monkeypatch, "number.car_charging_amps", 32)
+            raise AssertionError("the unchanged range limit must not be written")
+
+    async def prepared(*args, **kwargs):
+        if (holder := kwargs.get("charge_binding_holder")) is not None:
+            holder.append(object())
+        return True
+
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", prepared)
+    monkeypatch.setattr(actions, "_tesla_ble_charge_data_binding", lambda *_a, **_k: object())
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    hass.services = _RejectRange()
+
+    result = asyncio.run(actions._set_ev_charging_amps_ble(
+        hass, "car", 32, allow_stale_entity_max_override=True, configured_max_amps=32))
+
+    assert result is True
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 32}),
+    ]

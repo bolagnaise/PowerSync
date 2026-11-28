@@ -214,6 +214,8 @@ Update PowerSync through HACS and rebuild the existing Pedro bridge YAML using t
 
 From v2.12.1864, PowerSync doesn't send a current setting the car already reports. If the car-reported Current limit and the Charging amps number already equal the target, and the bridge's Last update sensor changed within the last 2 minutes, PowerSync counts the setting as applied and sends nothing. Without a companion sample, HA suppresses the unchanged value, so a repeated write could never be confirmed.
 
+From v2.12.1869 the same rule applies when a request is above the bridge's Charging amps maximum. Home Assistant rejects the request before it reaches the car, and PowerSync falls back to that maximum. If the car already reports the maximum, PowerSync counts it as applied and sends nothing, instead of re-writing an unchanged value that leaves an unconfirmed command blocking the next start.
+
 An unconfirmed command no longer holds the car indefinitely on its own:
 
 - **Current setting:** retired within about a minute, without a cloud read. Whether it landed or not, the car charges at its previous or new current, and the next setting replaces it.
