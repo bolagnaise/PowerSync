@@ -282,7 +282,6 @@ namespace esphome
 
         class TeslaBLEVehicle : public PollingComponent,
                                 public ble_client::BLEClientNode,
-                                public esp32_ble_tracker::ESPBTDeviceListener,
                                 public esphome::api::CustomAPIDevice
         {
         public:
@@ -293,7 +292,19 @@ namespace esphome
             bool set_runtime_vin(const std::string &vin);
             std::string runtime_vin() const { return runtime_config_ ? std::string(runtime_vin_buf_) : recovery_vin_; }
             bool runtime_vin_set() const { return runtime_vin_buf_[0] != '\0'; }
-            bool parse_device(const esp32_ble_tracker::ESPBTDevice &device) override;
+            bool runtime_parse_device(const esp32_ble_tracker::ESPBTDevice &device);
+            // A separate listener object: inheriting ESPBTDeviceListener would
+            // make BLEClientNode::parent_ ambiguous.
+            class RuntimeDiscoveryListener : public esp32_ble_tracker::ESPBTDeviceListener {
+            public:
+                explicit RuntimeDiscoveryListener(TeslaBLEVehicle *owner) : owner_(owner) {}
+                bool parse_device(const esp32_ble_tracker::ESPBTDevice &device) override {
+                    return owner_->runtime_parse_device(device);
+                }
+            private:
+                TeslaBLEVehicle *owner_;
+            };
+            RuntimeDiscoveryListener *runtime_listener() { return &runtime_listener_; }
             int post_wake_poll_time_;
             int poll_data_period_;
             int poll_asleep_period_;
@@ -394,6 +405,7 @@ namespace esphome
             // runtime VIN must live in storage owned for the component's life.
             char runtime_vin_buf_[18]{};
             std::string runtime_expected_name_;
+            RuntimeDiscoveryListener runtime_listener_{this};
             void load_polling_parameters (const int post_wake_poll_time, const int poll_data_period,
                                           const int poll_asleep_period, const int poll_charging_period,
                                           const int ble_disconnected_min_time, const int fast_poll_if_unlocked,

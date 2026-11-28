@@ -19,6 +19,9 @@ class _States:
     def get(self, entity_id):
         return self._states.get(entity_id)
 
+    def async_all(self):
+        return [SimpleNamespace(entity_id=k, **vars(v)) for k, v in self._states.items()]
+
 
 def _state(value, **attributes):
     return SimpleNamespace(state=str(value), attributes=attributes)
@@ -82,6 +85,19 @@ def test_updated_bridge_at_or_above_car_limit_clears_both_notices(issues):
         "tesla_ble_bridge_update_teslable", "tesla_ble_bridge_capped_teslable"}
 
 
+def test_installer_bridge_named_after_its_mac_is_found_without_a_prefix(issues):
+    """Installer images are named ``Tesla BLE <mac>``; a lone bridge is discovered."""
+    hass = _hass({
+        "sensor.tesla_ble_dd95d4_charging_state": _state("Stopped"),
+        "number.tesla_ble_dd95d4_charging_amps": _state(16, max=48),
+        "sensor.tesla_ble_dd95d4_charge_current_request_max": _state(32),
+    })
+    entry = SimpleNamespace(data={"ev_provider": "tesla_ble"}, options={})
+    results = asyncio.run(health.async_check_tesla_ble_bridges(hass, entry))
+    assert [r.prefix for r in results] == ["tesla_ble_dd95d4"]
+    assert not results[0].needs_update and not results[0].capped
+
+
 def test_missing_bridge_and_fleet_only_installs_raise_nothing(issues):
     asyncio.run(health.async_check_tesla_ble_bridges(_hass({}), _entry()))
     fleet = SimpleNamespace(data={"ev_provider": "fleet_api"}, options={})
@@ -98,3 +114,42 @@ def test_each_configured_bridge_is_checked(issues):
     })
     asyncio.run(health.async_check_tesla_ble_bridges(hass, _entry("teslable, second")))
     assert [c[1] for c in issues if c[0] == "create"] == ["tesla_ble_bridge_update_teslable"]
+
+
+def _vin_hass(monkeypatch, states, vins):
+    hass = _hass(states)
+    calls = []
+
+    async def call(domain, service, data, blocking=False):
+        calls.append((domain, service, data))
+
+    hass.services = SimpleNamespace(async_call=call)
+    monkeypatch.setattr(health, "known_tesla_vins", lambda _hass: list(vins))
+    return hass, calls
+
+
+def test_installer_bridge_without_vin_gets_the_single_known_car(monkeypatch):
+    hass, calls = _vin_hass(monkeypatch, {"text.tesla_ble_tesla_vin": _state("")}, ["5YJ3E1EA7KF000001"])
+    entry = SimpleNamespace(data={"ev_provider": "both", "tesla_ble_entity_prefix": "tesla_ble"}, options={})
+    written = asyncio.run(health.async_fill_runtime_vins(hass, entry))
+    assert written == {"tesla_ble": "5YJ3E1EA7KF000001"}
+    assert calls == [("text", "set_value", {"entity_id": "text.tesla_ble_tesla_vin", "value": "5YJ3E1EA7KF000001"})]
+
+
+def test_vin_fill_leaves_a_set_vin_and_fixed_firmware_alone(monkeypatch):
+    hass, calls = _vin_hass(monkeypatch, {"text.tesla_ble_tesla_vin": _state("5YJYGDEE1LF000002")}, ["5YJ3E1EA7KF000001"])
+    entry = SimpleNamespace(data={"ev_provider": "both", "tesla_ble_entity_prefix": "tesla_ble"}, options={})
+    assert asyncio.run(health.async_fill_runtime_vins(hass, entry)) == {}
+    hass, calls2 = _vin_hass(monkeypatch, {}, ["5YJ3E1EA7KF000001"])
+    assert asyncio.run(health.async_fill_runtime_vins(hass, entry)) == {}
+    assert calls == calls2 == []
+
+
+def test_vin_fill_uses_explicit_mapping_and_skips_ambiguous_cars(monkeypatch):
+    states = {"text.a_tesla_vin": _state(""), "text.b_tesla_vin": _state("unknown")}
+    hass, calls = _vin_hass(monkeypatch, states, ["5YJ3E1EA7KF000001", "5YJYGDEE1LF000002"])
+    mapped = SimpleNamespace(data={"ev_provider": "both", "tesla_ble_entity_prefix": "a,b",
+                                   "tesla_ble_vehicle_mapping": "5YJYGDEE1LF000002=b"}, options={})
+    written = asyncio.run(health.async_fill_runtime_vins(hass, mapped))
+    assert written.get("b") == "5YJYGDEE1LF000002"
+    assert "a" not in written or written["a"] != "5YJYGDEE1LF000002"

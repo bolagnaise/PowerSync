@@ -7,6 +7,7 @@
 # provisioned in the browser over USB (Improv) or the setup hotspot.
 #
 # Build one board with, for example:
+#   cp installer-secrets.yaml secrets.yaml
 #   esphome -s board esp32-c5-devkitc-1 -s variant ESP32C5 \
 #     -s tesla_ble_component ../components compile powersync-tesla-ble.yaml
 substitutions:
@@ -64,4 +65,6 @@ text:
       return id(tesla_ble_vehicle_id)->runtime_vin();
     set_action:
       - lambda: |-
-          id(tesla_ble_vehicle_id)->set_runtime_vin(x);
+          if (id(tesla_ble_vehicle_id)->set_runtime_vin(x)) {
+            id(powersync_tesla_vin).publish_state(id(tesla_ble_vehicle_id)->runtime_vin());
+          }

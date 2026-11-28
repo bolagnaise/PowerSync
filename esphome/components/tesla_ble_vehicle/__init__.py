@@ -187,7 +187,7 @@ async def to_code(config):
     cg.add(var.set_vin(config[CONF_VIN]))
     if config["runtime_config"]:
         cg.add(var.set_runtime_config(True))
-        await esp32_ble_tracker.register_ble_device(var, config)
+        await esp32_ble_tracker.register_ble_device(var.runtime_listener(), config)
     if "recovery_proof" in config:
         proof = await cg.get_variable(config["recovery_proof"])
         cg.add(var.set_recovery_proof(proof))

@@ -81,12 +81,22 @@ def bridge_health(hass: Any, prefix: str, registry_ids: Iterable[str]) -> Bridge
     )
 
 
-def configured_prefixes(config: Mapping[str, Any]) -> list[str]:
-    from .tesla_ble_mapping import configured_ble_prefixes
+def configured_prefixes(config: Mapping[str, Any], hass: Any = None) -> list[str]:
+    """BLE bridge prefixes, resolving a single unmapped bridge by discovery.
+
+    Installer-image bridges are named after their MAC (``tesla_ble_ab12cd``),
+    so the default ``tesla_ble`` prefix alone would miss them.
+    """
+    from .tesla_ble_mapping import configured_ble_prefixes, resolve_ble_prefixes
 
     provider = str(config.get("ev_provider") or "").strip().lower()
     if provider and provider not in {"tesla_ble", "both"}:
         return []
+    if hass is not None:
+        try:
+            return resolve_ble_prefixes(hass, config)
+        except Exception:
+            _LOGGER.debug("Tesla BLE prefix discovery unavailable", exc_info=True)
     return configured_ble_prefixes(config)
 
 
@@ -96,7 +106,7 @@ async def async_check_tesla_ble_bridges(hass: Any, entry: Any) -> list[BridgeHea
     from homeassistant.helpers import issue_registry as ir
 
     config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
-    prefixes = configured_prefixes(config)
+    prefixes = configured_prefixes(config, hass)
     registry = er.async_get(hass)
     registry_ids = list(registry.entities.keys()) if hasattr(registry.entities, "keys") else [
         e.entity_id for e in registry.entities.values()
@@ -149,17 +159,75 @@ async def async_check_tesla_ble_bridges(hass: Any, entry: Any) -> list[BridgeHea
     return results
 
 
+def known_tesla_vins(hass: Any) -> list[str]:
+    """VINs of Tesla vehicles Home Assistant knows from Tesla integrations."""
+    from homeassistant.helpers import device_registry as dr
+
+    from .const import TESLA_INTEGRATIONS
+    from .registry_compat import iter_device_entries
+
+    vins: list[str] = []
+    for device in iter_device_entries(dr.async_get(hass)):
+        for identifier in getattr(device, "identifiers", ()) or ():
+            if (
+                len(identifier) >= 2
+                and identifier[0] in TESLA_INTEGRATIONS
+                and len(str(identifier[1])) == 17
+                and str(identifier[1]).isalnum()
+            ):
+                vins.append(str(identifier[1]).upper())
+    return list(dict.fromkeys(vins))
+
+
+async def async_fill_runtime_vins(hass: Any, entry: Any) -> dict[str, str]:
+    """Set the VIN on PowerSync installer-image bridges that don't have one.
+
+    Only an explicit VIN=prefix mapping or an unambiguous single car and
+    bridge is used. This writes the bridge's "Tesla VIN" setting, which is
+    configuration on the bridge, not a vehicle command.
+    """
+    from .tesla_ble_mapping import ble_prefix_vehicle_pairs
+
+    config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+    prefixes = configured_prefixes(config, hass)
+    if not prefixes:
+        return {}
+    try:
+        pairs = ble_prefix_vehicle_pairs(config, known_tesla_vins(hass), prefixes)
+    except Exception:
+        _LOGGER.debug("Tesla BLE VIN pairing unavailable", exc_info=True)
+        return {}
+    written: dict[str, str] = {}
+    for prefix, vin in pairs.items():
+        entity_id = f"text.{prefix}_tesla_vin"
+        state = hass.states.get(entity_id)
+        if state is None or str(state.state).strip().lower() not in ("", "unknown"):
+            continue
+        await hass.services.async_call(
+            "text", "set_value", {"entity_id": entity_id, "value": vin}, blocking=True
+        )
+        written[prefix] = vin
+        _LOGGER.info(
+            "Set the Tesla VIN (...%s) on BLE bridge %s from Home Assistant", vin[-4:], prefix
+        )
+    return written
+
+
 FIRST_CHECK_DELAY_SECONDS = 120
-CHECK_INTERVAL_SECONDS = 6 * 3600
+CHECK_INTERVAL_SECONDS = 15 * 60
 
 
 def start(hass: Any, entry: Any) -> None:
-    """Check after setup settles and every six hours until the entry unloads."""
+    """Check after setup settles and every 15 minutes until the entry unloads."""
     from datetime import timedelta
 
     from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
     async def _run(_now=None) -> None:
+        try:
+            await async_fill_runtime_vins(hass, entry)
+        except Exception:
+            _LOGGER.debug("Tesla BLE VIN fill failed", exc_info=True)
         try:
             await async_check_tesla_ble_bridges(hass, entry)
         except Exception:

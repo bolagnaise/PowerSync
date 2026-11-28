@@ -112,7 +112,7 @@ bool TeslaBLEVehicle::set_runtime_vin(const std::string &input) {
   return true;
 }
 
-bool TeslaBLEVehicle::parse_device(const esp32_ble_tracker::ESPBTDevice &device) {
+bool TeslaBLEVehicle::runtime_parse_device(const esp32_ble_tracker::ESPBTDevice &device) {
   if (!runtime_config_ || !runtime_discovering_ || runtime_expected_name_.empty()) return false;
   if (device.get_name() != runtime_expected_name_) return false;
   const uint64_t mac = device.address_uint64();
