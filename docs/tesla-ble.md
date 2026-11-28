@@ -3,6 +3,7 @@
 - [Tesla BLE charging-power freshness](#tesla-ble-power-freshness)
 - [Tesla BLE charging freshness and confirmation](#tesla-ble-reliability)
 - [Update your Tesla BLE bridge](#update-your-tesla-ble-bridge)
+- [Install a new bridge from your browser](#install-a-new-bridge-from-your-browser)
 - [Native Tesla Charge on Solar over BLE](tesla-ev-charging.md#tesla-native-solar-ble) (optional Pedro package `esphome/charge-on-solar.yaml`)
 
 ## Update your Tesla BLE bridge
@@ -26,7 +27,18 @@ If you built the bridge yourself in ESPHome, open its YAML in your ESPHome dashb
 
 The car's pairing key is stored on the bridge and survives a wireless update, so you don't re-pair. Entity IDs stay the same. If Home Assistant adds an area prefix to the new sensors (for example `sensor.garage_<prefix>_charge_current_request_max`), rename them back to `sensor.<prefix>_...` under **Settings > Entities**, because PowerSync looks them up by those names.
 
-If you no longer have the bridge's YAML or its OTA password, the wireless update is refused. Rebuild it from a fresh YAML and flash it over USB from the ESPHome dashboard, then pair the car again.
+If you no longer have the bridge's YAML or its OTA password, the wireless update is refused. Flash it over USB with the [PowerSync Tesla BLE installer](https://bolagnaise.github.io/PowerSync/ble/) instead (Chrome or Edge on a computer), then pair the car again.
+
+### Install a new bridge from your browser
+
+The [PowerSync Tesla BLE installer](https://bolagnaise.github.io/PowerSync/ble/) flashes a ready-made Pedro-family bridge with the PowerSync companion and a 48 A maximum onto an ESP32, ESP32-S3, ESP32-C5 or ESP32-C6. You don't need ESPHome, YAML or passwords:
+
+1. Plug the board in over USB, select **Install Tesla BLE bridge** and enter your Wi-Fi when asked.
+2. Add the discovered **Tesla BLE** device in Home Assistant (**Settings > Devices & services**).
+3. PowerSync fills in the bridge's **Tesla VIN** from your Tesla integration within about 15 minutes, or you type it in yourself. The bridge then finds the car over Bluetooth.
+4. In the car with your key card, press **Pair BLE key** on the device and accept the key on the car's screen.
+
+The device is named after its address (for example `tesla_ble_dd95d4`). PowerSync finds one bridge by itself; with several, enter each prefix in PowerSync's Tesla BLE settings.
 
 <a id="tesla-ble-power-freshness"></a>
 

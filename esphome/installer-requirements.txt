@@ -1,0 +1,2 @@
+# ESPHome used to build the prebuilt Tesla BLE installer images (pages.yml).
+esphome==2026.11.1
