@@ -8922,7 +8922,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._adopt_solved_ev_series(result)
             self._commit_price_forecast_cache(import_prices, export_prices)
             self._last_update_time = dt_util.now()
-            if regression_recorder is None and getattr(self, "_ev_return_decisions", None):
+            if (getattr(self, "_regression_recorder", None) is None
+                    and getattr(self, "_ev_return_decisions", None)
+                    and hasattr(self, "_maybe_ask_ev_return")):
                 try:
                     await self._maybe_ask_ev_return(
                         _run_optimizer_once, result, import_prices, export_prices,
