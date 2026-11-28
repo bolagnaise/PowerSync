@@ -3005,6 +3005,14 @@
     }
   },
   "issues": {
+    "tesla_ble_bridge_update": {
+      "title": "Update the Tesla BLE bridge \u201c{prefix}\u201d",
+      "description": "The Tesla BLE bridge **{prefix}** runs firmware that doesn\u2019t report your car\u2019s charging limit, and its charging-amps maximum is {amps_max} A. Home Assistant refuses any charging current above that maximum, so Boost, Solar Surplus and Smart Schedule can never charge faster over Bluetooth, even if your car and charger allow more.\n\nUpdate the bridge to the PowerSync bridge firmware v2.12.1870 or newer, with `charging_amps_max` set to `\"48\"`. Keep its device name, keys and pairing. The car then applies its own limit, and PowerSync reads it.\n\nFollow [Update your Tesla BLE bridge]({guide}).\n\nThis notice clears automatically once the bridge reports the car\u2019s charging limit."
+    },
+    "tesla_ble_bridge_capped": {
+      "title": "Tesla BLE bridge \u201c{prefix}\u201d limits charging to {amps_max} A",
+      "description": "Your car accepts up to **{car_limit} A** from its charger, but the Tesla BLE bridge **{prefix}** was built with a charging-amps maximum of **{amps_max} A**. Home Assistant refuses any charging current above that, so every Bluetooth charging mode stays at {amps_max} A or below.\n\nRebuild the bridge with `charging_amps_max` set to `\"48\"` and reinstall it. See [Update your Tesla BLE bridge]({guide}).\n\nThis notice clears automatically once the bridge maximum is at or above your car\u2019s limit."
+    },
     "goodwe_recovery_identity": {
       "title": "GoodWe recovery is waiting for its original device",
       "description": "PowerSync has saved GoodWe settings to restore, but the selected Home Assistant device no longer matches the saved connection. Battery control is paused and the recovery record is retained. Keep the original GoodWe integration entry and restore its connection if possible. Contact PowerSync support with the GoodWe recovery warning before deleting entries or changing inverter modes. Telemetry can continue while recovery is pending."
