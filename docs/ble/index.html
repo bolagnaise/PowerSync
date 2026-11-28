@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PowerSync Tesla BLE Bridge Installer</title>
+    <meta name="description" content="Install the PowerSync Tesla Bluetooth bridge firmware on an ESP32 from your browser.">
+    <link rel="icon" href="https://raw.githubusercontent.com/Bolagnaise/PowerSync/main/assets/images/favicon.png" type="image/png">
+    <script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-card: #1a2035;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-yellow: #eab308;
+            --border: #2a3350;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            line-height: 1.6;
+        }
+        main { max-width: 720px; margin: 0 auto; padding: 40px 16px 64px; }
+        h1 { font-size: 1.8rem; margin: 0 0 8px; }
+        h2 { font-size: 1.15rem; margin: 32px 0 8px; }
+        p, li { color: var(--text-secondary); }
+        strong, code { color: var(--text-primary); }
+        code { background: var(--bg-card); padding: 1px 6px; border-radius: 4px; }
+        .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 20px 0; }
+        .note { border-left: 3px solid var(--accent-yellow); padding-left: 12px; }
+        esp-web-install-button { display: block; margin: 16px 0 4px; }
+        button.install {
+            background: var(--accent-blue); color: #fff; border: 0; border-radius: 8px;
+            padding: 12px 20px; font-size: 1rem; font-weight: 600; cursor: pointer;
+        }
+        a { color: var(--accent-blue); }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Tesla BLE bridge installer</h1>
+    <p>Install the PowerSync Tesla Bluetooth bridge firmware on an ESP32 straight from this page. No ESPHome dashboard, YAML or passwords needed.</p>
+
+    <div class="card">
+        <strong>You need</strong>
+        <ul>
+            <li>An ESP32, ESP32-S3, ESP32-C5 or ESP32-C6 board, for example an M5Stack Atom S3 or NanoC6.</li>
+            <li>A USB <em>data</em> cable (some cables only charge).</li>
+            <li>Chrome or Edge on a computer.</li>
+        </ul>
+        <esp-web-install-button manifest="manifest.json">
+            <button slot="activate" class="install">Install Tesla BLE bridge</button>
+            <span slot="unsupported">Your browser can't install firmware. Use Chrome or Edge on a computer.</span>
+            <span slot="not-allowed">This page must be opened over HTTPS.</span>
+        </esp-web-install-button>
+        <p>After the install, enter your Wi-Fi when the installer asks.</p>
+    </div>
+
+    <h2>1. Add it to Home Assistant</h2>
+    <p>Home Assistant finds the new <strong>Tesla BLE</strong> device under <strong>Settings &gt; Devices &amp; services</strong>. Select <strong>Configure</strong> to add it. The device is named <strong>Tesla BLE</strong> plus the last six characters of its address, for example <strong>Tesla BLE dd95d4</strong>. PowerSync finds a single bridge by itself. With two or more bridges, enter each one's entity prefix (for example <code>tesla_ble_dd95d4</code>) in PowerSync's Tesla BLE settings.</p>
+
+    <h2>2. Set your car</h2>
+    <p>If PowerSync already knows your Tesla (through Tesla Fleet, Teslemetry or Tessie), it fills in the bridge's <strong>Tesla VIN</strong> setting within about 15 minutes. Otherwise, open the Tesla BLE device and type your 17-character VIN into <strong>Tesla VIN</strong>. The bridge then finds your car over Bluetooth by itself.</p>
+
+    <h2>3. Pair it with your car</h2>
+    <p>Sit in the car with your key card. On the Tesla BLE device in Home Assistant, press <strong>Pair BLE key</strong>, then tap the key card on the centre console and accept the new key on the car's screen.</p>
+
+    <div class="card note">
+        <p><strong>Replacing an existing bridge?</strong> If you still have its ESPHome YAML, update it wirelessly instead: see <a href="https://github.com/bolagnaise/PowerSync/blob/main/docs/tesla-ble.md#update-your-tesla-ble-bridge">Update your Tesla BLE bridge</a>. Installing from this page erases the board, so you pair the car again (step 3).</p>
+        <p>The bridge's charging-current maximum is 48 A. Your car still applies its own charger limit, so it never charges faster than your charger allows.</p>
+    </div>
+</main>
+</body>
+</html>

@@ -43,6 +43,7 @@ namespace esphome
       this->read_uuid_ = espbt::ESPBTUUID::from_raw(READ_UUID);
       this->write_uuid_ = espbt::ESPBTUUID::from_raw(WRITE_UUID);
       ble_disconnected_time_ = millis(); // Initialise disconnect time on startup
+      this->load_runtime_config_();
       ble_read_buffer_.reserve(MAX_BLE_MESSAGE_SIZE);
       schedules_json_.reserve(2048);
 

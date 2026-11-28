@@ -22481,31 +22481,6 @@ def _get_ev_display_coordinator(hass, entry):
         # measured zero (or leave the pre-normalized gross load in the payload).
         normalized_site = status_view._site_snapshot()
         site.update(normalized_site)
-        normalized_live_status = {
-            "solar_power": (
-                None
-                if site["solar_power_kw"] is None
-                else site["solar_power_kw"] * 1000
-            ),
-            "grid_power": (
-                None
-                if site["grid_power_kw"] is None
-                else site["grid_power_kw"] * 1000
-            ),
-            "battery_power": (
-                None
-                if site["battery_power_kw"] is None
-                else site["battery_power_kw"] * 1000
-            ),
-            "load_power": (
-                None
-                if site["load_power_kw"] is None
-                else site["load_power_kw"] * 1000
-            ),
-            "battery_soc": site["battery_soc"],
-            "is_curtailed": site["is_curtailed"],
-        }
-        from .automations.actions import _calculate_solar_surplus
         from .automations.loadpoint_status import resolve_loadpoint_surplus_power_kw
         from .solar_surplus_config import get_stored_solar_surplus_config
 
@@ -22517,13 +22492,11 @@ def _get_ev_display_coordinator(hass, entry):
         known_loadpoint_power_kw = resolve_loadpoint_surplus_power_kw(
             payload.get("loadpoints", [])
         )
-        site["surplus_kw"] = round(
-            _calculate_solar_surplus(
-                normalized_live_status,
-                known_loadpoint_power_kw,
-                get_stored_solar_surplus_config(entry_data),
-            ),
-            2,
+        site["surplus_kw"] = _site_surplus_kw(
+            hass,
+            entry,
+            known_loadpoint_power_kw,
+            get_stored_solar_surplus_config(entry_data),
         )
         return payload
 
@@ -22578,6 +22551,28 @@ class EVWidgetDataView(HomeAssistantView):
                 {"success": False, "error": str(err)},
                 status=500,
             )
+
+def _site_surplus_kw(
+    hass: HomeAssistant, entry: ConfigEntry, ev_power_kw: float, solar_config: dict
+) -> float:
+    """Spare solar for EVs, from the same fresh telemetry the controllers use.
+
+    ``EVLoadpointStatusView._site_snapshot`` is a display projection: it takes
+    the first coordinator with data, even a failed or stale refresh. Surplus
+    built from it paired a retained battery sample with the live EV draw and
+    showed several kW of spare solar at night. Use the shared usable snapshot
+    (which also carries the EV-drift sample) and report none when no site
+    telemetry is usable.
+    """
+    from .automations.actions import _calculate_solar_surplus
+    from .automations.live_status import site_live_status
+
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    live_status, _configured = site_live_status(entry_data, dt_util.utcnow())
+    if live_status is None:
+        return 0.0
+    return round(_calculate_solar_surplus(live_status, ev_power_kw, solar_config), 2)
+
 
 class EVLoadpointStatusView(HomeAssistantView):
     """API endpoint for normalized EV/loadpoint status.
@@ -22667,7 +22662,7 @@ class EVLoadpointStatusView(HomeAssistantView):
     async def _async_build_response(self, request, *, observed_vehicle_sink=None):
         """Get normalized EV loadpoint status."""
         try:
-            from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
+            from .automations.actions import _dynamic_ev_state
             from .automations.generic_charger_soc import resolve_ocpp_charger_soc
             from .ev_display import resolve_zaptec_display_soc
             from .zaptec_state import zaptec_power_draw
@@ -22720,30 +22715,6 @@ class EVLoadpointStatusView(HomeAssistantView):
             )
 
             site = self._site_snapshot()
-            live_status = {
-                "solar_power": (
-                    None
-                    if site["solar_power_kw"] is None
-                    else site["solar_power_kw"] * 1000
-                ),
-                "grid_power": (
-                    None
-                    if site["grid_power_kw"] is None
-                    else site["grid_power_kw"] * 1000
-                ),
-                "battery_power": (
-                    None
-                    if site["battery_power_kw"] is None
-                    else site["battery_power_kw"] * 1000
-                ),
-                "load_power": (
-                    None
-                    if site["load_power_kw"] is None
-                    else site["load_power_kw"] * 1000
-                ),
-                "battery_soc": site["battery_soc"],
-                "is_curtailed": site["is_curtailed"],
-            }
             solar_config = get_stored_solar_surplus_config(entry_data)
 
             observed_vehicles = []
@@ -23008,13 +22979,8 @@ class EVLoadpointStatusView(HomeAssistantView):
             site["ev_power_kw"] = (
                 None if has_unknown_active_ev_power else round(total_ev_power_kw, 2)
             )
-            site["surplus_kw"] = round(
-                _calculate_solar_surplus(
-                    live_status,
-                    total_ev_power_kw,
-                    solar_config,
-                ),
-                2,
+            site["surplus_kw"] = _site_surplus_kw(
+                self._hass, self._config_entry, total_ev_power_kw, solar_config
             )
 
             loadpoints = build_loadpoint_status(
@@ -52109,6 +52075,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .tesla_ev_auto_recovery import start as _start_ev_auto_recovery
     _start_ev_auto_recovery(hass, entry)
+
+    from .tesla_ble_bridge_health import start as _start_ble_bridge_health
+    _start_ble_bridge_health(hass, entry)
 
     _LOGGER.info("=" * 60)
     # Optional diagnostics must never make successful energy setup fail.

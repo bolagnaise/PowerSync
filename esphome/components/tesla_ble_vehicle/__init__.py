@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import ble_client, binary_sensor, text_sensor, sensor, switch, select
+from esphome.components import ble_client, binary_sensor, text_sensor, sensor, switch, select, esp32_ble_tracker
 from esphome.const import CONF_ID, STATE_CLASS_MEASUREMENT
 from enum import Enum, auto
 from dataclasses import dataclass
@@ -146,6 +146,8 @@ SENSOR_TYPES_INFO = {
 schema_dict = {
     cv.GenerateID(CONF_ID): cv.declare_id(TeslaBLEVehicle),
     cv.Required(CONF_VIN): cv.string,
+    # PowerSync prebuilt images: VIN entered at runtime, car address discovered.
+    cv.Optional("runtime_config", default=False): cv.boolean,
 
     cv.Optional(CONF_POST_WAKE_POLL_TIME): cv.uint16_t,
     cv.Optional(CONF_POLL_DATA_PERIOD): cv.uint16_t,
@@ -174,6 +176,7 @@ CONFIG_SCHEMA = (
     cv.Schema(schema_dict)
     .extend(cv.polling_component_schema("1min"))
     .extend(ble_client.BLE_CLIENT_SCHEMA)
+    .extend(esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA)
 )
 
 async def to_code(config):
@@ -182,6 +185,9 @@ async def to_code(config):
     await ble_client.register_ble_node(var, config)
 
     cg.add(var.set_vin(config[CONF_VIN]))
+    if config["runtime_config"]:
+        cg.add(var.set_runtime_config(True))
+        await esp32_ble_tracker.register_ble_device(var.runtime_listener(), config)
     if "recovery_proof" in config:
         proof = await cg.get_variable(config["recovery_proof"])
         cg.add(var.set_recovery_proof(proof))
