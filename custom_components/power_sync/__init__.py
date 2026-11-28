@@ -2371,7 +2371,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             and ble_charging_state.state.lower() == "charging"
             and (ble_soc_value is None or ble_soc_value < 100)
             and not fleet_away_is_newer
-            and not ble_quarantined(hass, prefix)
+            and not ble_quarantined(hass, prefix, include_in_flight=False)
         )
 
         if is_ble_charging and ble_state and ble_state.state not in ("unknown", "unavailable"):
@@ -16710,7 +16710,7 @@ class EVVehiclesView(HomeAssistantView):
         """Get vehicle data from Tesla BLE entities."""
         from .tesla_ev_recovery import ble_quarantined
 
-        quarantined = ble_quarantined(self._hass, prefix)
+        quarantined = ble_quarantined(self._hass, prefix, include_in_flight=False)
         # Accept either the optional ESPHome node status or Tesla BLE status.
         status_state = get_tesla_ble_status_state(self._hass, prefix)
 
@@ -21898,7 +21898,55 @@ class ChargingBoostView(HomeAssistantView):
                     recovery_runtime, boost_vehicle_id, action_params, actions,
                     duration_minutes, target_soc_value, stops_at, pairing, warnings)
 
-            response = await start_finite(self._hass, self._config_entry, action_params)
+            # Waking a Tesla and confirming the start can take 40 s or more,
+            # longer than many phone/proxy connections stay open. Run the
+            # Boost as its own task: quick refusals still return directly,
+            # and a start still in progress returns "accepted" while the task
+            # finishes (status and last_command report the final outcome).
+            boost_coro = start_finite(self._hass, self._config_entry, action_params)
+            create_task = getattr(self._hass, "async_create_task", None)
+            # Home Assistant keeps a reference to tasks it creates.
+            boost_task = (
+                create_task(boost_coro, name=f"power_sync_boost_{boost_vehicle_id}")
+                if callable(create_task) else asyncio.ensure_future(boost_coro)
+            )
+            try:
+                done, _pending = await asyncio.wait(
+                    {boost_task},
+                    timeout=getattr(self, "_boost_response_wait_seconds", 20.0),
+                )
+            except asyncio.CancelledError:
+                # Shutdown/unload cancelled the request: cancel the Boost
+                # with it and let its own cleanup finish before propagating.
+                boost_task.cancel()
+                await asyncio.gather(boost_task, return_exceptions=True)
+                raise
+            if not done:
+                def _log_late_boost_result(task) -> None:
+                    if task.cancelled():
+                        _LOGGER.warning("EV Boost start was cancelled after it was accepted")
+                        return
+                    err = task.exception()
+                    if err is not None:
+                        _LOGGER.error("EV Boost start failed after it was accepted: %s", err)
+                        return
+                    late = task.result()
+                    if not isinstance(late, dict) or not late.get("success"):
+                        _LOGGER.warning(
+                            "EV Boost start did not complete after it was accepted: %s",
+                            late.get("error") if isinstance(late, dict) else "refused",
+                        )
+
+                boost_task.add_done_callback(_log_late_boost_result)
+                return web.json_response({
+                    "success": True,
+                    "pending": True,
+                    "message": (
+                        "Boost accepted. The car is waking up; charging "
+                        "should start within a minute."
+                    ),
+                })
+            response = boost_task.result()
             if not isinstance(response, dict):
                 response = {"success": False, "error": "Boost was refused by EV admission"}
             return web.json_response(response)
@@ -22900,7 +22948,10 @@ class EVLoadpointStatusView(HomeAssistantView):
                         r"ble_(?!default$)[a-z0-9_]+", vehicle_id
                     )
                     route = (
-                        get_vehicle_route(self._hass, self._config_entry, vehicle_id) or {}
+                        get_vehicle_route(
+                            self._hass, self._config_entry, vehicle_id,
+                            include_in_flight=False,
+                        ) or {}
                         if exact_vehicle else {}
                     )
                     reason = route.get("reason")

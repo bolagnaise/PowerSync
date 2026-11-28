@@ -2970,3 +2970,42 @@ async def test_load_does_not_save_when_nothing_is_old_enough(harness):
     store.value = state
     assert await recovery.async_load_recovery_state(hass, entry)
     assert store.saves == []
+
+
+@pytest.mark.asyncio
+async def test_in_flight_ble_attempt_is_not_a_status_hold(harness):
+    """A Start still being sent must not report its own bridge as held."""
+    hass, entry, _, _ = harness
+    route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "start", route["entity_id"]
+    )
+    assert ticket is not None
+    # Control still refuses an overlapping command while this one is sent.
+    assert recovery.ble_quarantined(hass, "bridge_a")
+    # Status readers do not treat the in-flight command as a stuck hold.
+    assert not recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)
+
+    await recovery.async_finish_attempt(ticket, "sent_unknown")
+    # An unknown result is a genuine hold for status as well as control.
+    assert recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)
+
+
+@pytest.mark.asyncio
+async def test_pending_attempt_without_live_sender_still_holds(harness, monkeypatch):
+    """A pending row nobody is sending any more (restart or stale sender) holds."""
+    hass, entry, _, _ = harness
+    route = _route("bridge_a", "switch.car_a_charger", "switch.fallback")
+    ticket = await recovery.async_begin_attempt(
+        hass, entry, VIN_A, route, "start", route["entity_id"]
+    )
+    assert ticket is not None
+    started = recovery._IN_FLIGHT_ATTEMPTS[ticket.attempt_id]
+    monkeypatch.setattr(
+        recovery.time, "monotonic",
+        lambda: started + recovery.IN_FLIGHT_ATTEMPT_MAX_SECONDS + 1,
+    )
+    assert recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)
+
+    recovery._IN_FLIGHT_ATTEMPTS.clear()
+    assert recovery.ble_quarantined(hass, "bridge_a", include_in_flight=False)

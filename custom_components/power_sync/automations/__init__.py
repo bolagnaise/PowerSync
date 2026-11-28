@@ -1171,7 +1171,9 @@ class AutomationEngine:
                     )
                     is not None
                 )
-                if targetable_rank and ble_quarantined(self._hass, candidate_prefix):
+                if targetable_rank and ble_quarantined(
+                    self._hass, candidate_prefix, include_in_flight=False
+                ):
                     continue
                 if signal in (
                     "charge_power",

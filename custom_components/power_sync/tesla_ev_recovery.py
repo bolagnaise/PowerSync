@@ -85,6 +85,24 @@ class RecoveryTicket:
     runtime_ref: Any = None
 
 
+# Attempts whose command is still being sent by this process. A pending
+# journal row is a hold only once nobody is still waiting on it: after a
+# restart this map is empty, so a retained pending attempt holds again.
+# The age cap keeps a crashed sender from hiding a real hold.
+_IN_FLIGHT_ATTEMPTS: dict[str, float] = {}
+IN_FLIGHT_ATTEMPT_MAX_SECONDS = 300.0
+
+
+def _attempt_in_flight(attempt_id: Any) -> bool:
+    started = _IN_FLIGHT_ATTEMPTS.get(str(attempt_id or ""))
+    if started is None:
+        return False
+    if time.monotonic() - started > IN_FLIGHT_ATTEMPT_MAX_SECONDS:
+        _IN_FLIGHT_ATTEMPTS.pop(str(attempt_id), None)
+        return False
+    return True
+
+
 def _runtime(hass: Any, entry: Any) -> dict[str, Any] | None:
     data = getattr(hass, "data", {}).get(DOMAIN, {})
     runtime = data.get(getattr(entry, "entry_id", None)) if isinstance(data, Mapping) else None
@@ -3375,10 +3393,12 @@ async def async_begin_attempt(
         except asyncio.CancelledError:
             await _restore_after_cancel(hass, entry, runtime, before)
             raise
+        _IN_FLIGHT_ATTEMPTS[attempt_id] = time.monotonic()
         return RecoveryTicket(hass, entry, vid, attempt_id, deepcopy(pinned), runtime)
 
 
 async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
+    _IN_FLIGHT_ATTEMPTS.pop(str(ticket.attempt_id), None)
     runtime = _runtime(ticket.hass, ticket.entry)
     normalized = str(getattr(outcome, "value", outcome) or "").lower().strip()
     if (runtime is None or runtime.get(_RECOVERY_STOPPING_KEY) is True
@@ -3886,7 +3906,9 @@ def _isolation_valid(hass: Any, hazard: Mapping[str, Any]) -> bool:
             and samples["fence"]["request_id"] == request_id)
 
 
-def _unresolved_routes(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+def _unresolved_routes(
+    ledger: Mapping[str, Any], *, include_in_flight: bool = True,
+) -> list[Mapping[str, Any]]:
     """Return producer routes whose command effect remains unresolved."""
     attempts = ledger.get("attempts", {})
     routes = []
@@ -3895,6 +3917,10 @@ def _unresolved_routes(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         if (isinstance(route, Mapping) and route.get("kind") in ROUTE_KINDS
                 and not record.get("recovery_retired")
                 and record.get("outcome", "pending") in ("pending", "sent_unknown")):
+            if (not include_in_flight
+                    and record.get("outcome", "pending") == "pending"
+                    and _attempt_in_flight(record.get("attempt_id"))):
+                continue
             routes.append(route)
     for hazard in _hazards(ledger):
         if (hazard.get("kind") == "ble_quarantine"
@@ -4328,7 +4354,15 @@ async def async_expire_settled_ble_attempts(
         return True, f"retired {len(pending)} settled BLE attempt(s){released}"
 
 
-def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] | None:
+def get_vehicle_route(
+    hass: Any, entry: Any, vehicle_id: Any, *, include_in_flight: bool = True,
+) -> dict[str, Any] | None:
+    """Resolve the command route for a vehicle.
+
+    Control callers keep the default so a command still being sent blocks an
+    overlapping one. Status readers pass ``include_in_flight=False`` so a
+    normal command in progress is not reported as a recovery hold.
+    """
     vid = str(vehicle_id or "")
     runtime = _runtime(hass, entry)
     if runtime is None:
@@ -4345,7 +4379,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
         return None
     route = ledger.get("route")
     if not isinstance(route, Mapping):
-        unresolved = _unresolved_routes(ledger)
+        unresolved = _unresolved_routes(ledger, include_in_flight=include_in_flight)
         return _blocked(vid, unresolved[0], _unresolved_route_reason(unresolved)) if unresolved else None
     if route.get("kind") not in ROUTE_KINDS:
         return _blocked(vid, route, "malformed_recovery")
@@ -4361,7 +4395,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
             return _blocked(vid, route, "malformed_recovery")
         if hazard.get("state") == "isolated" and route.get("kind") == "ble":
             return _blocked(vid, route, "ble_recovery")
-    unresolved = _unresolved_routes(ledger)
+    unresolved = _unresolved_routes(ledger, include_in_flight=include_in_flight)
     if unresolved:
         if (route.get("kind") != "ha"
                 or any(item.get("kind") != "ble" for item in unresolved)
@@ -4433,7 +4467,13 @@ def pending_ble_attempt(hass: Any, entry: Any, vehicle_id: Any) -> RecoveryTicke
     return None
 
 
-def ble_quarantined(hass: Any, prefix: str) -> bool:
+def ble_quarantined(hass: Any, prefix: str, *, include_in_flight: bool = True) -> bool:
+    """Return whether retained BLE command history holds this bridge.
+
+    Control gates keep the default so a second command cannot overlap one
+    still being sent. Status readers pass ``include_in_flight=False``: a
+    command this process is still sending is not a stuck hold.
+    """
     data = getattr(hass, "data", {}).get(DOMAIN, {})
     if not isinstance(data, Mapping):
         return True
@@ -4457,6 +4497,10 @@ def ble_quarantined(hass: Any, prefix: str) -> bool:
                 if (route.get("kind") == "ble" and not record.get("recovery_retired")
                         and str(route.get("prefix")) == str(prefix)
                         and record.get("outcome", "pending") in ("pending", "sent_unknown")):
+                    if (not include_in_flight
+                            and record.get("outcome", "pending") == "pending"
+                            and _attempt_in_flight(record.get("attempt_id"))):
+                        continue
                     return True
             for hazard in _hazards(ledger):
                 if (hazard.get("kind") == "ble_quarantine" and not hazard.get("recovery_retired")
