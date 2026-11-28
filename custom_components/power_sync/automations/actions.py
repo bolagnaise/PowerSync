@@ -9623,8 +9623,14 @@ async def _send_expo_push(
     message: str,
     *,
     notification_type: str | None = None,
+    category_id: str | None = None,
+    data: dict | None = None,
 ) -> None:
-    """Send an Expo push to devices that accept this notification type."""
+    """Send an Expo push to devices that accept this notification type.
+
+    ``category_id`` selects the app's action buttons; ``data`` reaches the app
+    when the notification or one of its buttons is tapped.
+    """
     from ..const import DOMAIN
     import aiohttp
 
@@ -9669,6 +9675,8 @@ async def _send_expo_push(
                 "sound": "default",
                 "priority": "high",
                 "channelId": "default",  # Android channel ID
+                **({"categoryId": category_id} if category_id else {}),
+                **({"data": data} if data else {}),
             })
             _LOGGER.info(f"📱 PUSH DEBUG: Including token for {device} ({platform})")
         else:
