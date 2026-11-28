@@ -3759,6 +3759,71 @@ async def async_resume_completed_native_route(hass, entry, vehicle_id, *, author
         expected_identity=expected_identity, mode="positive_resume", authorize=current)
 
 
+async def async_release_ended_native_route(hass, entry, vehicle_id, *, authorize):
+    """Release a settled native session pin once no controller owns the car.
+
+    A native route stays pinned to the ownership lease that started it. When
+    that lease ends without a confirmed Stop (for example a restart cleared
+    ownership), the pin no longer matches anything and would block every
+    later command. Release it only when nobody owns the vehicle, the exact
+    producer binding is unchanged, and nothing about the route is unresolved:
+    no unknown attempt, hazard, cleanup fence or pending obligation. No
+    command is sent or replayed; the next command selects its route normally.
+    """
+    import sys
+    from .tesla_native_recovery import ACTIVE_KEY, _no_writers
+
+    runtime = _runtime(hass, entry)
+    vid = str(vehicle_id or "")
+    if runtime is None or not vid:
+        return False
+    if _session_scope(_owner_snapshot(hass, entry, vid)) is not None:
+        return False
+    generation = current_vehicle_generation(hass, entry, vid)
+    async with _journal_lock(runtime):
+        ledger = _ledger(runtime, vid, create=False)
+        route = ledger.get("route") if isinstance(ledger, Mapping) else None
+        if (not isinstance(route, Mapping) or route.get("kind") != "ha"
+                or route.get("vehicle_id") not in (None, vid)
+                or not isinstance(route.get("session_scope"), Mapping)
+                or route.get("cleanup_only") is True):
+            return False
+        if (_runtime(hass, entry) is not runtime or not _sidecar_ready(runtime)
+                or runtime.get(_SIDECAR_HOLD_KEY) is not None
+                or runtime.get(_RECOVERY_STOPPING_KEY)
+                or runtime.get(ACTIVE_KEY) is not None
+                or not recovery_control_allowed(hass, entry, vid, generation, "start")
+                or _journal_malformed(runtime, vid)
+                or _unresolved_routes(ledger)
+                or any(not item.get("recovery_retired") for item in _hazards(ledger))
+                or any(vid in runtime[_SIDECAR_STATE_KEY].get("obligations", {}).get(family, {})
+                       for family in ("ev_boost_sessions", "ev_quick_control_obligations"))
+                or _session_scope(_owner_snapshot(hass, entry, vid)) is not None
+                or not _no_writers(sys.modules[__name__], hass, vid)
+                or authorize() is not True):
+            return False
+        binding_route = deepcopy(dict(route))
+        binding_route.pop("session_scope", None)
+        if not _compatible(hass, entry, runtime, vid, binding_route):
+            return False
+        before = _snapshot_recovery(runtime)
+        ledger["route"] = None
+        try:
+            if not await _persist(hass, entry, runtime):
+                _restore_recovery(runtime, before)
+                return False
+        except asyncio.CancelledError:
+            await _restore_after_cancel(hass, entry, runtime, before)
+            raise
+    import logging
+
+    logging.getLogger(__name__).info(
+        "EV recovery: released the native route for vehicle ...%s; its charging "
+        "session ended with nothing unresolved", vid[-4:],
+    )
+    return True
+
+
 def _ble_binding(hass: Any, prefix: str, charger: str) -> dict[str, Any] | None:
     ids = (charger, f"switch.{prefix}_ble_connection", f"binary_sensor.{prefix}_ble_status")
     entities = [_identity(hass, item) for item in ids]

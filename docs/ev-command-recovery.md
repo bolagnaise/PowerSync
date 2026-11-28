@@ -284,6 +284,14 @@ changed providers/entities and other owners remain protected. Inspection reports
 producer-binding and session-scope matches separately so a real connection change
 is distinguishable from a completed session's old lease.
 
+If that lease ended and no controller owns the car any more (for example a
+Home Assistant restart cleared ownership before a confirmed Stop), PowerSync
+releases the old native route instead of refusing every later command with
+`route_identity_changed`. It does this only when the producer binding is
+unchanged and nothing is unresolved: no unknown attempt, hazard, cleanup fence
+or pending Boost or finite obligation. No command is sent; the next request
+selects its route normally. Another owner keeps the route protected.
+
 A new charging request can reconcile old native Start, Stop, current or limit
 attempts when:
 

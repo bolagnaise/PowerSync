@@ -6374,6 +6374,17 @@ async def _tesla_transport_route(hass, entry, params, operation):
 
         if await async_resume_completed_native_route(hass, entry, vehicle, authorize=can_resume):
             route = get_vehicle_route(hass, entry, vehicle)
+    if (operation != "stop" and route and route.get("reason") == "route_identity_changed"):
+        # The pinned session ended with nobody owning the car (for example a
+        # restart cleared ownership). Release the settled pin instead of
+        # refusing every later command for this vehicle.
+        from ..tesla_ev_recovery import async_release_ended_native_route
+
+        release_authority = _tesla_transport_authority(
+            hass, entry, params, operation=operation, ignore_recovery_gate=True)
+        if await async_release_ended_native_route(
+                hass, entry, vehicle, authorize=release_authority):
+            route = get_vehicle_route(hass, entry, vehicle)
     if (operation != "stop" and route and route.get("reason") == "native_recovery"):
         await _tesla_reconcile_native_history(hass, entry, params)
         route = get_vehicle_route(hass, entry, vehicle)
