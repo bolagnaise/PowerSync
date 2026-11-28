@@ -274,6 +274,9 @@ namespace esphome
             ChargerPhases,
             ChargeRate,
             DriverTemp,
+            // PowerSync: the highest current the car will accept from the
+            // connected charger (Tesla app slider maximum), not the setpoint.
+            ChargeCurrentRequestMax,
             Count
         };
 

@@ -28,3 +28,7 @@ text:
 
 tesla_ble_vehicle:
   recovery_proof: powersync_recovery_proof
+  # The car-reported charging current limit for the connected charger.
+  # PowerSync uses it as the BLE charger limit (sensor.<bridge>_charge_current_request_max).
+  charge_current_request_max:
+    name: "Charge current request max"

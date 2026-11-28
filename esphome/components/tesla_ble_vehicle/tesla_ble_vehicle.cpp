@@ -1861,6 +1861,14 @@ namespace esphome
             {
               ESP_LOGI (TAG, "No data to set charging amps");
             }
+            if (carserver_response.response_msg.vehicleData.charge_state.which_optional_charge_current_request_max)
+            {
+              publishSensor (NumericSensorId::ChargeCurrentRequestMax, carserver_response.response_msg.vehicleData.charge_state.optional_charge_current_request_max.charge_current_request_max);
+            }
+            else
+            {
+              ESP_LOGI (TAG, "No data to set charge current request max");
+            }
             if (carserver_response.response_msg.vehicleData.charge_state.which_optional_minutes_to_charge_limit)
             {
               publishSensor (NumericSensorId::MinsToLimit, carserver_response.response_msg.vehicleData.charge_state.optional_minutes_to_charge_limit.minutes_to_charge_limit);
