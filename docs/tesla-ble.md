@@ -216,7 +216,7 @@ From v2.12.1864, PowerSync doesn't send a current setting the car already report
 
 From v2.12.1869 the same rule applies when a request is above the bridge's Charging amps maximum. Home Assistant rejects the request before it reaches the car, and PowerSync falls back to that maximum. If the car already reports the maximum, PowerSync counts it as applied and sends nothing, instead of re-writing an unchanged value that leaves an unconfirmed command blocking the next start.
 
-The Charging amps maximum is set in the bridge firmware, not by the car. If it is lower than the maximum current configured in PowerSync, every BLE charging mode is limited to it, and PowerSync logs a warning once per restart. To charge at the full current, set the bridge's `charging_amps_max` substitution (for example `"32"`) in its ESPHome YAML and reinstall the firmware.
+The Charging amps maximum is set in the bridge firmware, not by the car. If it is lower than the maximum current configured in PowerSync, every BLE charging mode is limited to it, and PowerSync logs a warning once per restart. To charge at the full current, set the bridge's `charging_amps_max` substitution to `"48"` in its ESPHome YAML and reinstall the firmware, using the PowerSync companion from v2.12.1869 so the car's own limit is published (see [Install the companion component](ev-command-recovery.md#install-the-companion-component)).
 
 An unconfirmed command no longer holds the car indefinitely on its own:
 

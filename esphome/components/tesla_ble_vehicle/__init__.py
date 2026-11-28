@@ -120,6 +120,9 @@ SENSORS = {
         icon = "mdi:surround-sound-3-1", device_class = "", state_class = STATE_CLASS_MEASUREMENT, accuracy_decimals = 0,),
     "charge_rate": numeric (NumericSensorId.ChargeRate,
         icon = "mdi:speedometer", device_class = sensor.DEVICE_CLASS_SPEED, accuracy_decimals = 0, unit_of_measurement = "mph",),
+    # PowerSync: the car-reported maximum charging current for this charger.
+    "charge_current_request_max": numeric (NumericSensorId.ChargeCurrentRequestMax,
+        icon = "mdi:current-ac", device_class = sensor.DEVICE_CLASS_CURRENT, unit_of_measurement = "A",),
 }
 
 SENSOR_TYPES_INFO = {
