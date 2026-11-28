@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# PowerSync prebuilt Tesla BLE bridge (browser installer image).
+#
+# One image serves any car: the VIN is set at runtime (the "Tesla VIN" text
+# entity, which PowerSync fills in from Home Assistant) and the bridge finds
+# the car's BLE address from its VIN-derived advertisement name. Wi-Fi is
+# provisioned in the browser over USB (Improv) or the setup hotspot.
+#
+# Build one board with, for example:
+#   cp installer-secrets.yaml secrets.yaml
+#   esphome -s board esp32-c5-devkitc-1 -s variant ESP32C5 \
+#     -s tesla_ble_component ../components compile powersync-tesla-ble.yaml
+substitutions:
+  friendly_name: Tesla BLE
+  device_name: powersync-tesla-ble
+  device_description: PowerSync Tesla BLE bridge
+  charging_amps_max: "48"
+  # Placeholders satisfy the upstream compile-time checks; never a real car.
+  tesla_vin: "00000000000000000"
+  ble_mac_address: "00:00:00:00:00:01"
+  board: esp32dev
+  variant: ESP32
+  flash_size: 4MB
+  tesla_ble_component: github://bolagnaise/PowerSync@main
+  BLE_library: https://github.com/PedroKTFC/tesla-ble.git#969f05f9dfdd5bfb9f3da5ad6b9f5c2265be133b
+
+esphome:
+  name_add_mac_suffix: true
+
+packages:
+  tesla_packages:
+    url: https://github.com/PedroKTFC/esphome-tesla-ble/
+    ref: 651b4c25dcb24ce8d16d625a51868576e83bf2fe
+    files:
+      - packages/base.yml
+      - packages/common.yml
+      - packages/project.yml
+      - packages/client.yml
+  powersync_stop_recovery: !include ../stop-recovery.yaml
+
+# Prebuilt images carry no site secrets.
+wifi:
+  networks: !remove
+  ap:
+    password: !remove
+
+improv_serial:
+
+api:
+  encryption: {}
+
+tesla_ble_vehicle:
+  runtime_config: true
+
+text:
+  - platform: template
+    name: "Tesla VIN"
+    id: powersync_tesla_vin
+    icon: mdi:car-key
+    entity_category: config
+    mode: text
+    min_length: 0
+    max_length: 17
+    lambda: |-
+      return id(tesla_ble_vehicle_id)->runtime_vin();
+    set_action:
+      - lambda: |-
+          if (id(tesla_ble_vehicle_id)->set_runtime_vin(x)) {
+            id(powersync_tesla_vin).publish_state(id(tesla_ble_vehicle_id)->runtime_vin());
+          }

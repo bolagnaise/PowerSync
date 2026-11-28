@@ -3,6 +3,11 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  pull_request:
+    paths:
+      - 'esphome/**'
+      - 'docs/ble/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -11,11 +16,82 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
   cancel-in-progress: false
 
 jobs:
+  # Prebuilt PowerSync Tesla BLE bridge images for the browser installer
+  # (docs/ble). Cached by the firmware sources, so ordinary website pushes
+  # reuse the previous build.
+  ble-firmware:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - chip: esp32
+            family: ESP32
+            board: esp32dev
+            variant: ESP32
+          - chip: esp32s3
+            family: ESP32-S3
+            board: esp32-s3-devkitc-1
+            variant: ESP32S3
+          - chip: esp32c5
+            family: ESP32-C5
+            board: esp32-c5-devkitc-1
+            variant: ESP32C5
+          - chip: esp32c6
+            family: ESP32-C6
+            board: esp32-c6-devkitc-1
+            variant: ESP32C6
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - id: cache
+        uses: actions/cache@v6
+        with:
+          path: ble-firmware
+          key: ble-firmware-v2-${{ matrix.chip }}-${{ hashFiles('esphome/**/*.yaml', 'esphome/**/*.yml', 'esphome/components/**', 'esphome/installer-requirements.txt') }}
+
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.12'
+
+      - name: Build ${{ matrix.family }} image
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r esphome/installer-requirements.txt
+          cd esphome/installer
+          cp installer-secrets.yaml secrets.yaml
+          esphome \
+            -s board "${{ matrix.board }}" \
+            -s variant "${{ matrix.variant }}" \
+            -s tesla_ble_component ../components \
+            compile powersync-tesla-ble.yaml
+          mkdir -p "$GITHUB_WORKSPACE/ble-firmware"
+          cp .esphome/build/powersync-tesla-ble/build/firmware.factory.bin \
+             "$GITHUB_WORKSPACE/ble-firmware/powersync-tesla-ble-${{ matrix.chip }}.factory.bin"
+          cp .esphome/build/powersync-tesla-ble/build/firmware.ota.bin \
+             "$GITHUB_WORKSPACE/ble-firmware/powersync-tesla-ble-${{ matrix.chip }}.ota.bin"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ble-firmware-${{ matrix.chip }}
+          path: ble-firmware/
+          if-no-files-found: error
+          retention-days: 7
+
   deploy:
+    needs: ble-firmware
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -39,6 +115,43 @@ jobs:
              docs/images/app-price-chart.png \
              docs/images/app-settings.png \
              docs/images/logo-circle.png "$SITE_DIR/images/"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ble-firmware-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/powersync-pages/ble
+
+      - name: Stage the Tesla BLE installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          SITE_DIR="$RUNNER_TEMP/powersync-pages"
+          cp docs/ble/index.html "$SITE_DIR/ble/index.html"
+          VERSION=$(python3 -c "import json; print(json.load(open('custom_components/power_sync/manifest.json'))['version'])")
+          python3 - "$SITE_DIR/ble" "$VERSION" <<'PY'
+          import json, pathlib, sys
+          ble, version = pathlib.Path(sys.argv[1]), sys.argv[2]
+          families = {"esp32": "ESP32", "esp32s3": "ESP32-S3", "esp32c5": "ESP32-C5", "esp32c6": "ESP32-C6"}
+          builds = []
+          for chip, family in families.items():
+              image = ble / f"powersync-tesla-ble-{chip}.factory.bin"
+              if not image.is_file():
+                  raise SystemExit(f"missing installer image {image.name}")
+              builds.append({
+                  "chipFamily": family,
+                  "parts": [{"path": image.name, "offset": 0}],
+              })
+          manifest = {
+              "name": "PowerSync Tesla BLE bridge",
+              "version": version,
+              "home_assistant_domain": "esphome",
+              "new_install_prompt_erase": True,
+              "builds": builds,
+          }
+          (ble / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+          ls -l "$SITE_DIR/ble"
 
       - uses: actions/upload-pages-artifact@v4
         with:
