@@ -12209,12 +12209,13 @@ def test_unknown_home_battery_uses_standalone_loadpoint_charging_state(monkeypat
         assert should_charge is False and "unknown" in reason.lower()
 
 
+@pytest.mark.parametrize("enabled", [True, False])
 @pytest.mark.parametrize("readback,expect_hold", [
     ({"total_charge_power_w": 0, "phase_a_current": 0, "phase_b_current": 0, "phase_c_current": 0}, False),
     ({"total_charge_power_w": 7400, "phase_a_current": 10.7, "phase_b_current": 10.7, "phase_c_current": 10.7}, True),
     (None, True),  # no fresh telemetry
 ])
-def test_price_level_zaptec_stop_hold_follows_measured_draw(monkeypatch, readback, expect_hold):
+def test_price_level_zaptec_stop_hold_follows_measured_draw(monkeypatch, readback, expect_hold, enabled):
     """Ticket #186: a stopped Zaptec left in 'charging' at 0 W must not pin no_discharge."""
     class ZaptecEntry(_FakeConfigEntry):
         options = {
@@ -12225,7 +12226,7 @@ def test_price_level_zaptec_stop_hold_follows_measured_draw(monkeypatch, readbac
 
     clock = [200.0]
     monkeypatch.setattr(ev_planner.time, "monotonic", lambda: clock[0])
-    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    hass = _FakeHass(enabled=enabled, price_settings={"preserve_home_battery": True})
     data = hass.data["power_sync"]["entry-1"]
     data["zaptec_cached_state"] = {
         "charger_operation_mode": "charging", **(readback or {"total_charge_power_w": 0}),
@@ -12260,3 +12261,42 @@ def test_price_level_zaptec_stop_hold_follows_measured_draw(monkeypatch, readbac
         assert all(holds)
     else:
         assert not any(holds)
+
+
+def test_zaptec_alias_owner_does_not_pin_hold_for_idle_stopped_charger(monkeypatch):
+    """Ticket #186 variant: another owner on the same Zaptec must not keep a
+    stopped, 0 W Price-Level session holding no_discharge."""
+    other = "5YJTEST0000000002"
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "zaptec_standalone_enabled": True, "zaptec_username": "user@example.com",
+        "zaptec_charger_id": "charger-1",
+    })
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["zaptec_cached_state"] = {
+        "charger_operation_mode": "charging", "total_charge_power_w": 0,
+        "phase_a_current": 0, "phase_b_current": 0, "phase_c_current": 0,
+    }
+    now = ev_planner.time.monotonic()
+    runtime["zaptec_state_poll"] = {"started_at": now - 1, "completed_at": now}
+    runtime["automation_store"]._data["vehicle_charging_configs"] = [
+        {"vehicle_id": vin, "charger_type": "zaptec", "external_control_policy": "override"}
+        for vin in (VIN, other)
+    ]
+    ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    ownership.claim_ev_ownership(hass, entry, other, owner_mode="manual")
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(return_value=[{"vin": VIN}, {"vin": other}]))
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", AsyncMock(return_value=True))
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    state = executor._get_or_create_vehicle_state(VIN)
+    state.is_charging = True  # stop readback timed out with mode still 'charging'
+    executor._set_preserve_home_battery_intent("Cheap price")
+    executor.get_charging_decision_for_vehicle = AsyncMock(return_value=(False, "Price above threshold", ""))
+
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+
+    assert state.last_decision == "waiting"
+    assert runtime["scheduled_ev_preserve_state"]["active"] is False
+    runtime["zaptec_cached_state"]["total_charge_power_w"] = 7400
+    asyncio.run(executor.evaluate_all_vehicles(31.4))
+    assert runtime["scheduled_ev_preserve_state"]["active"] is True

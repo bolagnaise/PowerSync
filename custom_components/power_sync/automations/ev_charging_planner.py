@@ -12257,6 +12257,25 @@ class PriceLevelChargingExecutor:
             draw = self._zaptec_cached_charge_state(require_power_draw=True)
         return draw is not False
 
+    def _zaptec_preserve_needed(
+        self,
+        state: PriceLevelChargingState,
+        zaptec_charge_state: Optional[bool],
+        *,
+        stopping: bool,
+    ) -> bool:
+        """Return whether this Zaptec lifecycle still needs the battery hold."""
+        stop_hold = state.stop_pending or (stopping and state.is_charging)
+        return bool(
+            state.start_pending
+            or (stop_hold and self._zaptec_stop_hold_needed(state))
+            or (
+                not stop_hold
+                and state.is_charging
+                and zaptec_charge_state is not False
+            )
+        )
+
     def _zaptec_cached_readback_after(
         self, boundary: float, *, require_power_draw: bool = False,
     ) -> Optional[bool]:
@@ -12384,8 +12403,10 @@ class PriceLevelChargingExecutor:
             vehicle_state.last_decision = "waiting"
             vehicle_state.last_decision_reason = f"{reason}; another profile owns this Zaptec charger"
             await self.apply_preserve_home_battery(
-                vehicle_state.start_pending or vehicle_state.stop_pending
-                or (vehicle_state.is_charging and zaptec_charge_state is not False), reason,
+                self._zaptec_preserve_needed(
+                    vehicle_state, zaptec_charge_state, stopping=not should_charge,
+                ),
+                reason,
             )
             return decision
 
@@ -12466,8 +12487,9 @@ class PriceLevelChargingExecutor:
                     else f"{reason}; external stop unconfirmed"
                 )
                 await self.apply_preserve_home_battery(
-                    vehicle_state.is_charging
-                    or vehicle_state.stop_pending,
+                    self._zaptec_preserve_needed(
+                        vehicle_state, zaptec_charge_state, stopping=True,
+                    ),
                     reason,
                 )
                 return decision
@@ -12480,9 +12502,9 @@ class PriceLevelChargingExecutor:
                     vehicle_vin=pseudo_vin,
                 )
                 await self.apply_preserve_home_battery(
-                    vehicle_state.is_charging
-                    or vehicle_state.start_pending
-                    or vehicle_state.stop_pending,
+                    self._zaptec_preserve_needed(
+                        vehicle_state, zaptec_charge_state, stopping=True,
+                    ),
                     reason,
                 )
                 return decision
@@ -12533,17 +12555,9 @@ class PriceLevelChargingExecutor:
             )
             vehicle_state.last_decision_reason = reason
 
-        stop_hold = (
-            vehicle_state.stop_pending
-            or (not should_charge and vehicle_state.is_charging)
-        )
         await self.apply_preserve_home_battery(
-            vehicle_state.start_pending
-            or (stop_hold and self._zaptec_stop_hold_needed(vehicle_state))
-            or (
-                not stop_hold
-                and vehicle_state.is_charging
-                and zaptec_charge_state is not False
+            self._zaptec_preserve_needed(
+                vehicle_state, zaptec_charge_state, stopping=not should_charge,
             ),
             reason,
         )
@@ -12843,12 +12857,14 @@ class PriceLevelChargingExecutor:
                 vehicle_state.last_decision = "charging" if vehicle_state.is_charging else "waiting"
                 vehicle_state.last_decision_reason = reason
 
+        zaptec_charge_state = self._zaptec_cached_charge_state()
         any_price_level_charging = any(
-            state.start_pending or state.stop_pending or (
-                state.is_charging and (
-                    vin not in zaptec_vins or self._zaptec_cached_charge_state() is not False
-                )
+            self._zaptec_preserve_needed(
+                state, zaptec_charge_state,
+                stopping=not (results.get(vin) or (True,))[0],
             )
+            if vin in zaptec_vins
+            else state.start_pending or state.stop_pending or state.is_charging
             for vin, state in self._vehicle_states.items()
         )
         reason = next(
