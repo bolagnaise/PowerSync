@@ -178,6 +178,8 @@ their installation and physical results do not validate this candidate.
 
 ### Ownership and charging plans
 
+A Boost, or Smart Schedule switching between its grid and solar controllers (for example when a free-grid window ends), keeps a charge that is already running. When live vehicle telemetry shows the car charging under a started PowerSync session with no recovery hold, only the controller changes: no Stop is sent, and the solar controller continues from the running current. Without that evidence, the takeover stops the car and starts it again.
+
 The existing per-vehicle controller owns the charging target, allocation and
 deadline. Transport recovery does not introduce a second scheduler. An
 uncertain command retains that plan, the possible vehicle draw and the

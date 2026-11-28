@@ -20676,14 +20676,30 @@ async def _action_start_ev_charging_dynamic_locked(
     # keeps that charge running.  Stopping it first and starting again does
     # not work on a Tesla: the unconfirmed Stop holds the command route, the
     # Start is refused, and the car is left stopped with the Boost lost.
+    #
+    # Smart Schedule switching between its grid and solar controllers while
+    # the car charges (for example when a free-grid window ends) hands the
+    # running charge over the same way: only the controller changes.
     boost_adoption_state = None
     boost_adoption_evidence = None
     adoptable_state = entry_vehicles.get(vehicle_id)
+    smart_schedule_modes = {"smart_schedule", "smart_schedule_solar_surplus"}
+    smart_schedule_switch = (
+        owner_mode in smart_schedule_modes
+        and isinstance(_lease, dict)
+        and _lease.get("owner_mode") in smart_schedule_modes
+        and _lease.get("owner_mode") != owner_mode
+    )
     if (
         charger_type == "tesla"
-        and dynamic_mode == "battery_target"
-        and owner_mode == "boost"
-        and params.get("_user_initiated") is True
+        and (
+            (
+                dynamic_mode == "battery_target"
+                and owner_mode == "boost"
+                and params.get("_user_initiated") is True
+            )
+            or smart_schedule_switch
+        )
         and not params.get("quick_control")
         and handoff_observation is None
         and _lease_id == vehicle_id
@@ -20783,18 +20799,23 @@ async def _action_start_ev_charging_dynamic_locked(
             or boost_adoption_state.get("active")
             or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
         ):
-            reason = "the running charging session could not be handed to Boost"
+            reason = (
+                "the running charging session could not be handed to Boost"
+                if owner_mode == "boost"
+                else f"the running charging session could not be handed to {owner_mode}"
+            )
             if isinstance(result := params.get("_boost_start_result"), dict):
                 result["not_submitted"] = reason
             else:
                 record_ev_command(
-                    hass, config_entry, vehicle_id, command="start_boost",
+                    hass, config_entry, vehicle_id, command=f"start_{owner_mode}",
                     success=False, reason=reason,
                 )
             return False
         _LOGGER.info(
-            "Dynamic EV: Boost is taking over %s while it charges (%s); "
+            "Dynamic EV: %s is taking over %s while it charges (%s); "
             "no Stop is sent",
+            "Boost" if owner_mode == "boost" else owner_mode,
             vehicle_id,
             boost_adoption_evidence,
         )
@@ -21566,7 +21587,13 @@ async def _action_start_ev_charging_dynamic_locked(
             pass
 
     recovered_continuation_amps = None
-    if dynamic_mode == "solar_surplus":
+    if dynamic_mode == "solar_surplus" and boost_adoption_state is not None:
+        # An adopted running charge continues at the previous controller's
+        # current; the solar controller adjusts it from there.
+        recovered_continuation_amps = max(
+            1, int(round(float(boost_adoption_state.get("current_amps") or 0)))
+        )
+    elif dynamic_mode == "solar_surplus":
         recovered_continuation_amps = (
             _consume_recovered_solar_surplus_continuation_amps(
                 hass,
@@ -21618,7 +21645,9 @@ async def _action_start_ev_charging_dynamic_locked(
         "allocated_surplus_kw": 0,
         "_battery_acceptance_learner": initial_battery_acceptance_learner,
         "reason": (
-            "Recovered Solar Surplus session after Home Assistant restart"
+            "Continued the running charge on solar"
+            if recovered_continuation and boost_adoption_state is not None
+            else "Recovered Solar Surplus session after Home Assistant restart"
             if recovered_continuation
             else ""
         ),
