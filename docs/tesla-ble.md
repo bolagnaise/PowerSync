@@ -2,7 +2,29 @@
 
 - [Tesla BLE charging-power freshness](#tesla-ble-power-freshness)
 - [Tesla BLE charging freshness and confirmation](#tesla-ble-reliability)
+- [Update your Tesla BLE bridge](#update-your-tesla-ble-bridge)
 - [Native Tesla Charge on Solar over BLE](tesla-ev-charging.md#tesla-native-solar-ble) (optional Pedro package `esphome/charge-on-solar.yaml`)
+
+## Update your Tesla BLE bridge
+
+Every Tesla BLE bridge has a **charging-amps maximum** fixed when its firmware is built (`charging_amps_max`). Home Assistant refuses any charging current above it, so Boost, Solar Surplus, Smart Schedule and Price-Level can never charge faster over Bluetooth than that number, even when the car and charger allow more. Many bridges were built with 15 or 16 A.
+
+PowerSync shows a Repairs notice (**Settings > System > Repairs**) when a bridge:
+
+- runs firmware that doesn't report the car's charging limit (anything older than the PowerSync bridge firmware v2.12.1870), or
+- reports a car limit higher than the bridge's own maximum.
+
+**What to do:** rebuild the bridge with the PowerSync bridge firmware from v2.12.1870 and `charging_amps_max: "48"`. The car still applies its own limit (for example 32 A on a 7 kW Wall Connector, or 15 A on a 15 A circuit), and the bridge now reports that limit as `sensor.<prefix>_charge_current_request_max` so PowerSync uses it.
+
+If you built the bridge yourself in ESPHome, open its YAML in your ESPHome dashboard and:
+
+1. Set `charging_amps_max: "48"` under `substitutions:`.
+2. Point the PowerSync references at `v2.12.1870` or newer: `tesla_ble_component: github://bolagnaise/PowerSync@v2.12.1870` and the `powersync_stop_recovery` package `ref`. The full block is in [Install the companion component](ev-command-recovery.md#install-the-companion-component).
+3. Keep the device name, VIN, BLE MAC address, Wi-Fi, API and OTA keys exactly as they are, then select **Install > Wirelessly**.
+
+The car's pairing key is stored on the bridge and survives a wireless update, so you don't re-pair. Entity IDs stay the same. If Home Assistant adds an area prefix to the new sensors (for example `sensor.garage_<prefix>_charge_current_request_max`), rename them back to `sensor.<prefix>_...` under **Settings > Entities**, because PowerSync looks them up by those names.
+
+If you no longer have the bridge's YAML or its OTA password, the wireless update is refused. Use the browser installer instead, which flashes over USB.
 
 <a id="tesla-ble-power-freshness"></a>
 
