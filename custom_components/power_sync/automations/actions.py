@@ -5515,6 +5515,23 @@ async def _set_ev_charging_amps_ble(
     entity_max = _coerce_positive_int(state.attributes.get("max"), int(amps)) or int(amps)
     effective_max = entity_max
     if (
+        configured_max_amps is not None
+        and configured_max_amps > entity_max
+        and int(amps) > entity_max
+    ):
+        warned = hass.data.setdefault(DOMAIN, {}).setdefault(
+            "_tesla_ble_amps_max_warned", set()
+        )
+        if amps_entity not in warned:
+            warned.add(amps_entity)
+            # ESPHome number limits come from the bridge firmware, not the car.
+            _LOGGER.warning(
+                "Tesla BLE %s allows at most %sA but PowerSync is configured for "
+                "%sA; charging over BLE is limited to %sA. Raise the bridge's "
+                "charging amps maximum (charging_amps_max) to use the full current",
+                amps_entity, entity_max, configured_max_amps, entity_max,
+            )
+    if (
         allow_stale_entity_max_override
         and configured_max_amps is not None
         and configured_max_amps > entity_max

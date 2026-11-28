@@ -21599,3 +21599,27 @@ def test_ble_range_fallback_to_the_current_limit_is_not_rewritten(monkeypatch):
     assert hass.services.calls == [
         ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 32}),
     ]
+
+
+def test_ble_amps_max_below_configured_current_warns_once(monkeypatch, caplog):
+    """The bridge firmware's 15 A max silently capped every BLE mode (2026-11-28)."""
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("number.car_charging_amps", "15", {"min": 1, "max": 15}),
+        _State("sensor.car_current_limit", "15", last_updated=now - timedelta(minutes=10)),
+        _State("sensor.car_last_update", "x", last_updated=now - timedelta(seconds=20)),
+    ])
+    hass.data = {}
+
+    async def must_not_send(*args, **kwargs):
+        raise AssertionError("nothing should be written")
+
+    monkeypatch.setattr(actions, "_tesla_ble_prepare_mutation", must_not_send)
+    hass.services.async_call = must_not_send
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            asyncio.run(actions._set_ev_charging_amps_ble(
+                hass, "car", 32, configured_max_amps=32))
+    warnings = [r for r in caplog.records if "charging_amps_max" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "at most 15A" in warnings[0].getMessage()
