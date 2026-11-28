@@ -12207,3 +12207,56 @@ def test_unknown_home_battery_uses_standalone_loadpoint_charging_state(monkeypat
         assert should_charge is True
     else:
         assert should_charge is False and "unknown" in reason.lower()
+
+
+@pytest.mark.parametrize("readback,expect_hold", [
+    ({"total_charge_power_w": 0, "phase_a_current": 0, "phase_b_current": 0, "phase_c_current": 0}, False),
+    ({"total_charge_power_w": 7400, "phase_a_current": 10.7, "phase_b_current": 10.7, "phase_c_current": 10.7}, True),
+    (None, True),  # no fresh telemetry
+])
+def test_price_level_zaptec_stop_hold_follows_measured_draw(monkeypatch, readback, expect_hold):
+    """Ticket #186: a stopped Zaptec left in 'charging' at 0 W must not pin no_discharge."""
+    class ZaptecEntry(_FakeConfigEntry):
+        options = {
+            "zaptec_standalone_enabled": True,
+            "zaptec_username": "user@example.com",
+            "zaptec_charger_id": "charger-1",
+        }
+
+    clock = [200.0]
+    monkeypatch.setattr(ev_planner.time, "monotonic", lambda: clock[0])
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    data = hass.data["power_sync"]["entry-1"]
+    data["zaptec_cached_state"] = {
+        "charger_operation_mode": "charging", **(readback or {"total_charge_power_w": 0}),
+    }
+    polled = 200.0 if readback is not None else 10.0  # None: last poll is stale
+    data["zaptec_state_poll"] = {"started_at": polled - 1, "completed_at": polled}
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, ZaptecEntry())
+    state = executor._get_or_create_vehicle_state("zaptec_standalone")
+    state.is_charging = state.zaptec_owned = True
+    state.charging_mode = "price_level_opportunity"
+    executor._set_preserve_home_battery_intent("Cheap price")
+    executor.get_charging_decision = AsyncMock(
+        return_value=(False, "EV price 31.4c > 22c", "")
+    )
+
+    holds = []
+    # 40 minutes of one-minute polls; missing telemetry keeps the existing
+    # bounded stop-readback wait (ZAPTEC_STOP_READBACK_MAX_SECONDS).
+    for _ in range(40 if readback is not None else 14):
+        clock[0] += 60
+        if readback is not None:
+            data["zaptec_state_poll"] = {"started_at": clock[0] - 1, "completed_at": clock[0]}
+        asyncio.run(executor.evaluate_all_vehicles(31.4))
+        holds.append(data["scheduled_ev_preserve_state"]["active"])
+
+    assert stop.await_count >= 1  # The stop obligation itself is unchanged.
+    assert state.charging_mode == ""
+    if expect_hold:
+        assert all(holds)
+    else:
+        assert not any(holds)

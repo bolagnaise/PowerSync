@@ -9190,6 +9190,9 @@ class PriceLevelChargingState:
     # Monotonic boundary after the accepted stop command. A cached noncharging
     # sample is not a stop readback unless its poll began after this boundary.
     stop_requested_at: float = 0.0
+    # A stop that cancelled a pending start needs post-stop evidence before
+    # releasing the battery hold; the start may still take effect.
+    stop_hold_requires_readback: bool = False
     zaptec_owned: bool = False
     # Phase 2 grace clocks for data that went missing mid-charge.
     missing_data: dict = field(default_factory=dict)
@@ -11863,6 +11866,7 @@ class PriceLevelChargingExecutor:
         if is_zaptec:
             state.stop_pending = True
             state.stop_requested_at = time.monotonic()
+            state.stop_hold_requires_readback = pending_start
             cached_state = (
                 self.hass.data.get(self._domain, {})
                 .get(self.config_entry.entry_id, {})
@@ -11879,6 +11883,9 @@ class PriceLevelChargingExecutor:
             state.stop_pending = False
             state.stop_requested_at = 0.0
             state.is_charging = False
+        hold = state.is_charging or state.stop_pending
+        if is_zaptec:
+            hold = hold and self._zaptec_stop_hold_needed(state)
 
         if vehicle_vin:
             state.charging_mode = ""
@@ -11890,10 +11897,7 @@ class PriceLevelChargingExecutor:
             state.last_decision = "stopping" if state.stop_pending else "stopped"
             state.last_decision_reason = reason
             _LOGGER.info(f"Price-level charging: Stopped - {reason}")
-        await self.apply_preserve_home_battery(
-            state.is_charging or state.stop_pending,
-            reason,
-        )
+        await self.apply_preserve_home_battery(hold, reason)
         return True
 
     async def get_charging_decision(
@@ -12238,6 +12242,21 @@ class PriceLevelChargingExecutor:
             entry_data, now=time.monotonic(), require_power_draw=require_power_draw,
         )
 
+    def _zaptec_stop_hold_needed(self, state: PriceLevelChargingState) -> bool:
+        """Keep a stop-side battery hold unless fresh telemetry shows no draw.
+
+        A Zaptec can stay in ``charging`` mode at 0 W after Stop. The stop
+        obligation remains, but an idle charger cannot drain the home battery.
+        A cancelled start may still take effect, so it needs a post-Stop poll.
+        """
+        if state.stop_pending and state.stop_hold_requires_readback:
+            draw = self._zaptec_cached_readback_after(
+                state.stop_requested_at, require_power_draw=True,
+            )
+        else:
+            draw = self._zaptec_cached_charge_state(require_power_draw=True)
+        return draw is not False
+
     def _zaptec_cached_readback_after(
         self, boundary: float, *, require_power_draw: bool = False,
     ) -> Optional[bool]:
@@ -12320,7 +12339,9 @@ class PriceLevelChargingExecutor:
                 vehicle_state.last_decision_reason = (
                     f"{reason}; waiting for Zaptec stop readback"
                 )
-                await self.apply_preserve_home_battery(True, reason)
+                await self.apply_preserve_home_battery(
+                    self._zaptec_stop_hold_needed(vehicle_state), reason,
+                )
                 return decision
             if stop_readback is not False:
                 _LOGGER.warning(
@@ -12512,9 +12533,18 @@ class PriceLevelChargingExecutor:
             )
             vehicle_state.last_decision_reason = reason
 
+        stop_hold = (
+            vehicle_state.stop_pending
+            or (not should_charge and vehicle_state.is_charging)
+        )
         await self.apply_preserve_home_battery(
-            vehicle_state.start_pending or vehicle_state.stop_pending
-            or (vehicle_state.is_charging and zaptec_charge_state is not False),
+            vehicle_state.start_pending
+            or (stop_hold and self._zaptec_stop_hold_needed(vehicle_state))
+            or (
+                not stop_hold
+                and vehicle_state.is_charging
+                and zaptec_charge_state is not False
+            ),
             reason,
         )
         return decision
