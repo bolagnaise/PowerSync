@@ -19030,8 +19030,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 vin = status.get("vin")
                 threshold = threshold_for(configs, vehicle_id, vin)
+                record = records.get(vehicle_id) or {}
+                if record.get("asked_at"):
+                    status["question_sent_at"] = record["asked_at"]
+                    status["question_value"] = record.get("value")
                 if not should_evaluate(now=now, decision=decision, threshold=threshold,
-                                       record=records.get(vehicle_id)):
+                                       record=record):
                     continue
                 records[vehicle_id] = {**(records.get(vehicle_id) or {}),
                                        "checked_at": now.isoformat()}
