@@ -185,3 +185,17 @@ def test_resolved_bridge_prefix_is_checked(issues):
     entry = SimpleNamespace(data={"ev_provider": "tesla_ble"}, options={})
     asyncio.run(health.async_check_tesla_ble_bridges(hass, entry))
     assert [c[1] for c in issues if c[0] == "create"] == ["tesla_ble_bridge_update_garage_ble"]
+
+
+def test_vin_fill_never_guesses_between_several_cars_in_ble_only_mode(monkeypatch):
+    """Codex review: BLE-only with two known Teslas must not pick one."""
+    hass, calls = _vin_hass(
+        monkeypatch, {"text.tesla_ble_tesla_vin": _state("")},
+        ["5YJ3E1EA7KF000001", "5YJYGDEE1LF000002"],
+    )
+    entry = SimpleNamespace(data={"ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "tesla_ble"}, options={})
+    assert asyncio.run(health.async_fill_runtime_vins(hass, entry)) == {}
+    assert calls == []
+    mapped = SimpleNamespace(data={"ev_provider": "tesla_ble", "tesla_ble_entity_prefix": "tesla_ble",
+                                   "tesla_ble_vehicle_mapping": "5YJYGDEE1LF000002=tesla_ble"}, options={})
+    assert asyncio.run(health.async_fill_runtime_vins(hass, mapped)) == {"tesla_ble": "5YJYGDEE1LF000002"}

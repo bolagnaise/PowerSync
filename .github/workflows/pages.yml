@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ble-firmware
-          key: ble-firmware-v1-${{ matrix.chip }}-${{ hashFiles('esphome/components/**', 'esphome/installer/**', 'esphome/stop-recovery.yaml', 'esphome/installer-requirements.txt') }}
+          key: ble-firmware-v2-${{ matrix.chip }}-${{ hashFiles('esphome/**/*.yaml', 'esphome/**/*.yml', 'esphome/components/**', 'esphome/installer-requirements.txt') }}
 
       - if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6

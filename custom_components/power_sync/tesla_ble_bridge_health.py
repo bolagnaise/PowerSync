@@ -197,24 +197,42 @@ def known_tesla_vins(hass: Any) -> list[str]:
     return list(dict.fromkeys(vins))
 
 
+def runtime_vin_assignments(
+    config: Mapping[str, Any], known_vins: Iterable[str], prefixes: Iterable[str]
+) -> dict[str, str]:
+    """Bridge prefix -> VIN, only where the car is certain.
+
+    An explicit ``VIN=prefix`` mapping names the car. Otherwise only one known
+    Tesla and one bridge are unambiguous; several cars are never guessed,
+    whatever the charging provider.
+    """
+    from .tesla_ble_mapping import TeslaBleMappingError, parse_tesla_ble_vehicle_mapping
+
+    prefixes = list(dict.fromkeys(prefixes))
+    vins = list(dict.fromkeys(str(v).upper() for v in known_vins))
+    try:
+        mapping = parse_tesla_ble_vehicle_mapping(config.get("tesla_ble_vehicle_mapping"))
+    except TeslaBleMappingError:
+        return {}
+    if mapping:
+        return {prefix: vin for vin, prefix in mapping.items() if prefix in prefixes}
+    if len(vins) == 1 and len(prefixes) == 1:
+        return {prefixes[0]: vins[0]}
+    return {}
+
+
 async def async_fill_runtime_vins(hass: Any, entry: Any) -> dict[str, str]:
     """Set the VIN on PowerSync installer-image bridges that don't have one.
 
-    Only an explicit VIN=prefix mapping or an unambiguous single car and
-    bridge is used. This writes the bridge's "Tesla VIN" setting, which is
-    configuration on the bridge, not a vehicle command.
+    Only an explicit VIN=prefix mapping or a single car and bridge is used.
+    This writes the bridge's "Tesla VIN" setting, which is configuration on
+    the bridge, not a vehicle command.
     """
-    from .tesla_ble_mapping import ble_prefix_vehicle_pairs
-
     config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
     prefixes = configured_prefixes(config, hass)
     if not prefixes:
         return {}
-    try:
-        pairs = ble_prefix_vehicle_pairs(config, known_tesla_vins(hass), prefixes)
-    except Exception:
-        _LOGGER.debug("Tesla BLE VIN pairing unavailable", exc_info=True)
-        return {}
+    pairs = runtime_vin_assignments(config, known_tesla_vins(hass), prefixes)
     written: dict[str, str] = {}
     for prefix, vin in pairs.items():
         entity_id = f"text.{prefix}_tesla_vin"
