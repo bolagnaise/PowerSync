@@ -282,9 +282,18 @@ namespace esphome
 
         class TeslaBLEVehicle : public PollingComponent,
                                 public ble_client::BLEClientNode,
+                                public esp32_ble_tracker::ESPBTDeviceListener,
                                 public esphome::api::CustomAPIDevice
         {
         public:
+            // PowerSync runtime configuration (prebuilt installer images):
+            // the VIN is entered at runtime and the car's BLE address is
+            // discovered from its VIN-derived advertisement name.
+            void set_runtime_config(bool enabled) { runtime_config_ = enabled; }
+            bool set_runtime_vin(const std::string &vin);
+            std::string runtime_vin() const { return runtime_config_ ? std::string(runtime_vin_buf_) : recovery_vin_; }
+            bool runtime_vin_set() const { return runtime_vin_buf_[0] != '\0'; }
+            bool parse_device(const esp32_ble_tracker::ESPBTDevice &device) override;
             int post_wake_poll_time_;
             int poll_data_period_;
             int poll_asleep_period_;
@@ -378,6 +387,13 @@ namespace esphome
                                      esp_ble_gattc_cb_param_t *param) override;
             void dump_config() override;
             void set_vin(const char *vin);
+            void load_runtime_config_();
+            bool runtime_config_{false};
+            bool runtime_discovering_{false};
+            // The tesla-ble Client keeps a raw pointer to the VIN, so a
+            // runtime VIN must live in storage owned for the component's life.
+            char runtime_vin_buf_[18]{};
+            std::string runtime_expected_name_;
             void load_polling_parameters (const int post_wake_poll_time, const int poll_data_period,
                                           const int poll_asleep_period, const int poll_charging_period,
                                           const int ble_disconnected_min_time, const int fast_poll_if_unlocked,
