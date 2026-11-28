@@ -4278,7 +4278,7 @@ def test_generic_price_level_start_uses_generic_loadpoint_id(monkeypatch, fake_a
             "generic_charger_amps_entity": "number.garage_ev_current",
         }
 
-    async def wants_charge(self, current_price_cents):
+    async def wants_charge(self, current_price_cents, **_kwargs):
         return True, "Cheap price", "price_level_opportunity"
 
     monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
@@ -6007,7 +6007,7 @@ def test_auto_schedule_rate_update_uses_configured_sigenergy_evdc_rate_entity(
 def test_price_level_ocpp_start_uses_detected_hacs_prefix(monkeypatch, fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
-    async def wants_charge(self, current_price_cents):
+    async def wants_charge(self, current_price_cents, **_kwargs):
         return True, "Opportunity", "price_level_opportunity"
 
     class OcppEntry(_FakeConfigEntry):
@@ -12159,3 +12159,40 @@ def test_planner_missing_price_refusal_gets_the_grace_while_charging(
     _expire(state.missing_data, key)
     asyncio.run(executor.evaluate(dict(live), current_price_cents=None))
     executor._stop_charging.assert_awaited_once()
+
+
+@pytest.mark.parametrize("loadpoint_charging", [True, False])
+def test_unknown_home_battery_uses_standalone_loadpoint_charging_state(monkeypatch, loadpoint_charging):
+    """An unknown home battery blocks a new standalone start, never a running one."""
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def ev_soc(self, vehicle_vin=None):
+        return 30
+
+    async def unknown_home_battery(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner.PriceLevelChargingExecutor, "_get_ev_soc", ev_soc)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor, "_get_home_battery_soc", unknown_home_battery)
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(price_settings={
+            "recovery_soc": 40, "recovery_price_cents": 30,
+            "opportunity_price_cents": 10, "home_battery_minimum": 20,
+        }),
+        _FakeConfigEntry(),
+    )
+    # The legacy single-vehicle state is idle; only the loadpoint is charging.
+    executor._state.is_charging = False
+    should_charge, reason, _mode = asyncio.run(
+        executor.get_charging_decision(25, is_charging=loadpoint_charging))
+    if loadpoint_charging:
+        assert should_charge is True
+    else:
+        assert should_charge is False and "unknown" in reason.lower()

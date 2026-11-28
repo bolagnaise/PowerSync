@@ -11893,7 +11893,12 @@ class PriceLevelChargingExecutor:
         )
         return True
 
-    async def get_charging_decision(self, current_price_cents: Optional[float]) -> Tuple[bool, str, str]:
+    async def get_charging_decision(
+        self,
+        current_price_cents: Optional[float],
+        *,
+        is_charging: Optional[bool] = None,
+    ) -> Tuple[bool, str, str]:
         """
         Get charging decision without taking action.
 
@@ -11954,9 +11959,11 @@ class PriceLevelChargingExecutor:
                 self._state.last_decision = "waiting"
                 self._state.last_decision_reason = reason
                 return False, reason, ""
-            # An unknown level blocks a new start but never stops a running charge.
+            # An unknown level blocks a new start but never stops a running
+            # charge. Standalone loadpoints pass their own charging state.
+            running = self._state.is_charging if is_charging is None else is_charging
             allowed, reason = home_battery_start_allowed(home_battery_soc, min_home_battery)
-            if not allowed and not self._state.is_charging:
+            if not allowed and not running:
                 self._state.last_decision = "waiting"
                 self._state.last_decision_reason = reason
                 return False, reason, ""
@@ -12096,9 +12103,11 @@ class PriceLevelChargingExecutor:
         current_price_cents: Optional[float],
     ) -> Tuple[bool, str, str]:
         """Reconcile tracked and plug-in starts against the same Price-Level policy."""
-        decision = await self.get_charging_decision(current_price_cents)
-        should_charge, reason, mode = decision
         state = self._get_or_create_vehicle_state(loadpoint_id)
+        decision = await self.get_charging_decision(
+            current_price_cents, is_charging=bool(state.is_charging)
+        )
+        should_charge, reason, mode = decision
         # Phase 2: this loadpoint's own state tracks its charging, so the
         # missing-price grace is applied here rather than on self._state.
         if state.is_charging and not should_charge and reason == "No price data available":
@@ -12529,9 +12538,13 @@ class PriceLevelChargingExecutor:
             from ..const import CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME
             opts = {**self.config_entry.data, **self.config_entry.options}
             if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
-                decision = await self.get_charging_decision(current_price_cents)
                 tracked = self._tracked_zaptec_vehicle_ids()
                 target = tracked[0] if tracked else "zaptec_standalone"
+                target_state = self._vehicle_states.get(target)
+                decision = await self.get_charging_decision(
+                    current_price_cents,
+                    is_charging=bool(getattr(target_state, "is_charging", False)),
+                )
                 if len(tracked) > 1:
                     decision = (False, "Multiple unresolved Zaptec command profiles; cancelling before restart", "")
                 results[target] = await self._evaluate_zaptec_loadpoint(target, decision)
@@ -12617,7 +12630,11 @@ class PriceLevelChargingExecutor:
             # Discovery may temporarily lose the VIN or expose a different
             # alias. Keep the original command namespace for cancellation and
             # post-command readback; never create an independent new session.
-            decision = await self.get_charging_decision(current_price_cents)
+            selected_state = self._vehicle_states.get(selected_zaptec_vin)
+            decision = await self.get_charging_decision(
+                current_price_cents,
+                is_charging=bool(getattr(selected_state, "is_charging", False)),
+            )
             results[selected_zaptec_vin] = await self._evaluate_zaptec_loadpoint(selected_zaptec_vin, decision)
             zaptec_vins.append(selected_zaptec_vin)
         elif selected_zaptec_vin is None and len(zaptec_vins) > 1:
