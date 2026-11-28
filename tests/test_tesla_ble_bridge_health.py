@@ -19,6 +19,9 @@ class _States:
     def get(self, entity_id):
         return self._states.get(entity_id)
 
+    def async_all(self):
+        return [SimpleNamespace(entity_id=k, **vars(v)) for k, v in self._states.items()]
+
 
 def _state(value, **attributes):
     return SimpleNamespace(state=str(value), attributes=attributes)
@@ -45,13 +48,18 @@ def _hass(states):
     return SimpleNamespace(states=_States(states), _registry=SimpleNamespace(entities=ids))
 
 
+def _pedro(prefix="teslable"):
+    """An entity only the PedroKTFC firmware family publishes."""
+    return {f"number.{prefix}_poll_data_period": _state(60)}
+
+
 def _entry(prefixes="teslable"):
     return SimpleNamespace(data={"ev_provider": "both", "tesla_ble_entity_prefix": prefixes}, options={})
 
 
 def test_old_bridge_firmware_raises_update_notice_with_its_cap(issues):
     """Live 2026-11-28: a bridge built with 15 A capped every BLE mode silently."""
-    hass = _hass({"number.teslable_charging_amps": _state(15, max=15)})
+    hass = _hass({"number.teslable_charging_amps": _state(15, max=15), **_pedro()})
     asyncio.run(health.async_check_tesla_ble_bridges(hass, _entry()))
     created = [c for c in issues if c[0] == "create"]
     assert [c[1] for c in created] == ["tesla_ble_bridge_update_teslable"]
@@ -93,8 +101,35 @@ def test_missing_bridge_and_fleet_only_installs_raise_nothing(issues):
 def test_each_configured_bridge_is_checked(issues):
     hass = _hass({
         "number.teslable_charging_amps": _state(15, max=15),
+        **_pedro(),
         "number.second_charging_amps": _state(16, max=48),
         "sensor.second_charge_current_request_max": _state(16),
     })
     asyncio.run(health.async_check_tesla_ble_bridges(hass, _entry("teslable, second")))
     assert [c[1] for c in issues if c[0] == "create"] == ["tesla_ble_bridge_update_teslable"]
+
+
+def test_yoziru_bridge_is_not_told_to_switch_to_the_pedro_firmware(issues):
+    """Codex review: the companion update exists for the Pedro family only."""
+    hass = _hass({
+        "number.teslable_charging_amps": _state(15, max=15),
+        "sensor.teslable_battery": _state(60),
+        "sensor.teslable_charging": _state("Stopped"),
+    })
+    results = asyncio.run(health.async_check_tesla_ble_bridges(hass, _entry()))
+    assert not results[0].pedro_family and not results[0].needs_update
+    assert not [c for c in issues if c[0] == "create"]
+    # A notice raised before this check (older release) is cleared.
+    assert ("delete", "tesla_ble_bridge_update_teslable", None) in issues
+
+
+def test_resolved_bridge_prefix_is_checked(issues):
+    """Codex review: configured tesla_ble resolving to garage_ble still warns."""
+    hass = _hass({
+        "sensor.garage_ble_charging_state": _state("Charging"),
+        "number.garage_ble_charging_amps": _state(15, max=15),
+        **_pedro("garage_ble"),
+    })
+    entry = SimpleNamespace(data={"ev_provider": "tesla_ble"}, options={})
+    asyncio.run(health.async_check_tesla_ble_bridges(hass, entry))
+    assert [c[1] for c in issues if c[0] == "create"] == ["tesla_ble_bridge_update_garage_ble"]
