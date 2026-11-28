@@ -201,7 +201,9 @@ def test_reported_case_asks_before_the_export_window(mods):
     assert kwargs["category_id"] == "ev_return_question"
     assert [o["id"] for o in kwargs["data"]["options"]] == ["before", "after", "not_tonight"]
     assert kwargs["data"]["vehicle_id"] == "1"
-    assert store._data["ev_return_prompts"]["1"]["asked_until"]
+    record = store._data["ev_return_prompts"]["1"]
+    assert record["asked_until"] and record["question_id"] == kwargs["data"]["question_id"]
+    assert kwargs["data"]["expires_at"] == record["expires_at"]
 
     # Once asked, the same trip is not asked again.
     asyncio.run(c._maybe_ask_ev_return(run_once, actual, imports, exports, [0.5] * 12, [], TIMES, None))
@@ -218,3 +220,81 @@ def test_threshold_off_never_runs_a_second_solve(mods):
     asyncio.run(c._maybe_ask_ev_return(run_once, _result([0] * 12, [0] * 12), [0.3] * 12,
                                        [0.05] * 12, [0.5] * 12, [], TIMES, None))
     assert pushes == []
+
+
+def test_answer_rejection_covers_stale_taps(mods):
+    prompt, _ = mods
+    expires = NOW + timedelta(hours=18)
+    record = {"question_id": "q1", "expires_at": expires.isoformat()}
+    assert prompt.answer_rejection(record, "q1", NOW) is None
+    assert "expired" in prompt.answer_rejection(record, "q1", expires)
+    assert "replaced" in prompt.answer_rejection(record, "q0", NOW)
+    assert "replaced" in prompt.answer_rejection(None, "q1", NOW)  # trip ended: record cleared
+    assert "already answered" in prompt.answer_rejection({**record, "answered_at": NOW.isoformat()}, "q1", NOW)
+    q = prompt.build_question(vehicle_id="1", name="W3RT1E", soc=59, value=4.2,
+                              window_start=NOW + timedelta(hours=2), window_end=NOW + timedelta(hours=4),
+                              now=NOW, question_id="q1", expires_at=expires)
+    data = q.push_data("e1")
+    assert data["question_id"] == "q1" and data["expires_at"] == expires.isoformat()
+
+
+def _set_ev_return(mods, now):
+    """The real async_set_ev_return with HA stubbed out."""
+    import ast as _ast
+    ha = types.ModuleType("homeassistant")
+    util = types.ModuleType("homeassistant.util")
+    util.dt = SimpleNamespace(now=lambda: now, DEFAULT_TIME_ZONE=TZ)
+    sys.modules.update({"homeassistant": ha, "homeassistant.util": util})
+    importlib.import_module("power_sync.optimization.ev_return_inputs")
+    tree = _ast.parse((COMPONENT_ROOT / "ev_charging_services.py").read_text())
+    keep = [n for n in tree.body if isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+            and n.name in ("async_set_ev_return", "_default_not_home_until")]
+    keep += [n for n in tree.body if isinstance(n, _ast.Assign)
+             and any(getattr(t, "id", "") == "NOT_HOME_DEFAULT_HOUR" for t in n.targets)]
+    ns = {"__name__": "power_sync._svc_probe", "__package__": "power_sync", "asyncio": asyncio,
+          "DOMAIN": "power_sync", "HomeAssistantError": RuntimeError}
+    exec(compile(_ast.Module(body=keep, type_ignores=[]), "svc", "exec"), ns)
+    return ns["async_set_ev_return"]
+
+
+def test_stale_notification_answer_is_refused_and_fresh_one_applied(mods):
+    saved = {n: sys.modules.get(n, _SENTINEL) for n in ("homeassistant", "homeassistant.util",
+                                                         "power_sync.optimization.ev_return_inputs")}
+    try:
+        expires = NOW + timedelta(hours=18)
+        store = SimpleNamespace(_data={"ev_return_prompts": {"1": {
+            "question_id": "q1", "expires_at": expires.isoformat(), "asked_until": expires.isoformat()}}})
+
+        async def save():
+            pass
+        store.async_save = save
+        hass = SimpleNamespace(data={"power_sync": {"e1": {"automation_store": store}}})
+        entry = SimpleNamespace(entry_id="e1")
+
+        # Yesterday's "Not tonight", tapped after the question expired.
+        late = _set_ev_return(mods, expires + timedelta(hours=8))
+        with pytest.raises(RuntimeError, match="expired"):
+            asyncio.run(late(hass, entry, "1", "not_home", None, "q1"))
+        assert "ev_return_overrides" not in store._data
+
+        # A replaced question.
+        fresh = _set_ev_return(mods, NOW)
+        with pytest.raises(RuntimeError, match="replaced"):
+            asyncio.run(fresh(hass, entry, "1", "not_home", None, "q0"))
+
+        # The current question applies once.
+        asyncio.run(fresh(hass, entry, "1", "not_home", None, "q1"))
+        assert store._data["ev_return_overrides"]["1"]["mode"] == "not_home"
+        assert store._data["ev_return_prompts"]["1"]["answered_at"] == NOW.isoformat()
+        with pytest.raises(RuntimeError, match="already answered"):
+            asyncio.run(fresh(hass, entry, "1", "auto", None, "q1"))
+
+        # Answers from the panel or automations (no question id) still work.
+        asyncio.run(fresh(hass, entry, "1", "auto"))
+        assert "1" not in store._data["ev_return_overrides"]
+    finally:
+        for name, value in saved.items():
+            if value is _SENTINEL:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value

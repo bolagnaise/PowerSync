@@ -1310,6 +1310,15 @@ set_ev_return:
       required: false
       selector:
         datetime:
+    question_id:
+      name: Question ID
+      description: >-
+        Set by the mobile app when answering a notification. The answer is
+        refused if that question expired, was replaced, was already answered,
+        or the car has since arrived home.
+      required: false
+      selector:
+        text:
 set_smart_schedule_charging:
   name: Set Smart Schedule EV charging
   description: >-

@@ -130,20 +130,47 @@ class ReturnQuestion:
     value: float
     window_start: datetime
     window_end: datetime
+    question_id: str = ""
+    expires_at: datetime | None = None
 
     def push_data(self, entry_id: str) -> dict:
-        return {
+        data = {
             "type": NOTIFICATION_TYPE,
             "entry_id": entry_id,
             "vehicle_id": self.vehicle_id,
             "options": list(self.options),
             "value": round(self.value, 2),
+            "question_id": self.question_id,
         }
+        if self.expires_at is not None:
+            data["expires_at"] = self.expires_at.isoformat()
+        return data
+
+
+def answer_rejection(record: Mapping[str, Any] | None, question_id: str,
+                     now: datetime) -> str | None:
+    """Why a tapped answer must not be applied, or None when it may.
+
+    A notification can be tapped long after it was sent. Only the newest
+    question for the car's current trip, unanswered and unexpired, counts.
+    """
+    if not record or not question_id or record.get("question_id") != question_id:
+        return "This question was replaced or the car's trip has ended."
+    if record.get("answered_at"):
+        return "This question was already answered."
+    try:
+        expires = datetime.fromisoformat(str(record.get("expires_at") or record.get("asked_until")))
+    except (TypeError, ValueError):
+        return "This question has expired."
+    if expires.tzinfo is None or now >= expires:
+        return "This question has expired."
+    return None
 
 
 def build_question(*, vehicle_id: str, name: str, soc: float | None, value: float,
                    window_start: datetime, window_end: datetime, now: datetime,
-                   currency: str = "$") -> ReturnQuestion:
+                   currency: str = "$", question_id: str = "",
+                   expires_at: datetime | None = None) -> ReturnQuestion:
     options = []
     if window_start > now + timedelta(minutes=30):
         options.append({"id": "before", "label": f"Before {clock_label(window_start)}",
@@ -158,7 +185,8 @@ def build_question(*, vehicle_id: str, name: str, soc: float | None, value: floa
     choices = (f"before {clock_label(window_start)}, " if options[0]["id"] == "before" else "")
     body = (f"Home {choices}after {clock_label(window_end)}, or not tonight? "
             f"Knowing could change tonight's plan by about {currency}{value:.2f}.")
-    return ReturnQuestion(vehicle_id, title, body, tuple(options), value, window_start, window_end)
+    return ReturnQuestion(vehicle_id, title, body, tuple(options), value, window_start,
+                          window_end, question_id, expires_at)
 
 
 def should_evaluate(*, now: datetime, decision: Any, threshold: float,

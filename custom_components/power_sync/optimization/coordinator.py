@@ -19071,21 +19071,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                              if isinstance(c, dict) and str(c.get("vehicle_id", "")).upper()
                              in {str(vehicle_id).upper(), str(vin or "").upper()}
                              and c.get("display_name")), "Your car")
-                question = build_question(
-                    vehicle_id=vehicle_id, name=name,
-                    soc=status.get("soc"),
-                    value=value, window_start=start.astimezone(now.tzinfo),
-                    window_end=end.astimezone(now.tzinfo), now=now, currency=symbol)
                 from ..automations.actions import _send_expo_push
                 from ..ev_charging_services import _default_not_home_until
+                import uuid
 
+                question_id = uuid.uuid4().hex
+                expires_at = _default_not_home_until(now)
+                question = build_question(
+                    vehicle_id=vehicle_id, name=name, soc=status.get("soc"),
+                    value=value, window_start=start.astimezone(now.tzinfo),
+                    window_end=end.astimezone(now.tzinfo), now=now, currency=symbol,
+                    question_id=question_id, expires_at=expires_at)
                 await _send_expo_push(
                     self.hass, question.title, question.body,
                     notification_type=NOTIFICATION_TYPE, category_id=CATEGORY_ID,
                     data=question.push_data(self._entry.entry_id))
                 records[vehicle_id] = {
                     "checked_at": now.isoformat(), "asked_at": now.isoformat(),
-                    "asked_until": _default_not_home_until(now).isoformat(),
+                    "asked_until": expires_at.isoformat(),
+                    "question_id": question_id, "expires_at": expires_at.isoformat(),
                     "options": list(question.options), "value": round(value, 2),
                 }
                 status["question_sent_at"] = now.isoformat()
