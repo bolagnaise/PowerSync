@@ -62,6 +62,25 @@ unavailable location tracker, does not end a charge PowerSync is running while
 the car itself reports charging. A real away location, such as `not_home`,
 still ends it, and these readings still hold a car that has not started.
 
+When Solar Surplus ends a session for a Tesla it never started (for example,
+when you turn it off, the charge limit is reached, or Smart Schedule or Boost
+takes over), it skips the Stop only if the car is proven already stopped.
+With a Tesla BLE bridge, that proof is a fresh 0 kW report from the car's own
+bridge, with Stopped reported since the bridge connected. A stock ESPHome
+bridge must report Stopped and 0 kW together, and 0 A if it has a current
+sensor. With Fleet or Teslemetry, PowerSync also requires that the vehicle
+telemetry shows nothing newer. Otherwise a Stop is sent. This avoids a Stop
+the bridge cannot confirm, which would otherwise be held as an unresolved
+command.
+
+On sites that limit export to zero, Solar Surplus can briefly lift the export
+limit to see whether the car can use hidden solar. If the session ends during
+that check, for example because the car leaves, is unplugged or another mode
+takes over, PowerSync restores the export limit and can run the check again
+later. If a Tesla Start could not be confirmed, a fresh Stopped report at 0 kW
+from the car, or a successful Stop, settles it. Start retries stay at most
+once every five minutes.
+
 ### Powerwall calibration
 
 During a Tesla Powerwall calibration the gateway discharges the battery on its
@@ -116,6 +135,8 @@ an away report blocks the request.
 ### Battery-powered charging near zero grid flow
 
 Scheduled charging with no grid import holds its rate while the home battery keeps measured grid flow within the configured tolerance. Small fluctuations inside that tolerance do not reduce the rate repeatedly. Inverter capacity limits and reductions for grid imports above tolerance still apply.
+
+If a Tesla stops charging during a Scheduled window and then goes quiet (for example, it falls asleep), Scheduled no longer holds the session until the window ends. Fifteen minutes after its last Start, if the car's last report is Stopped and no reading shows it drawing power, Scheduled releases the session without sending Stop. On the next cycle it checks the window and price again and can start the car. It retries at most once every 15 minutes.
 
 ### Price Level charging on a shared Sigenergy AC charger
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
@@ -83,6 +83,24 @@ class RecoveryTicket:
     # reconstructed from durable evidence gets the new runtime object, while
     # a ticket retained across a reload cannot mutate the replacement state.
     runtime_ref: Any = None
+
+
+# Attempts whose command is still being sent by this process. A pending
+# journal row is a hold only once nobody is still waiting on it: after a
+# restart this map is empty, so a retained pending attempt holds again.
+# The age cap keeps a crashed sender from hiding a real hold.
+_IN_FLIGHT_ATTEMPTS: dict[str, float] = {}
+IN_FLIGHT_ATTEMPT_MAX_SECONDS = 300.0
+
+
+def _attempt_in_flight(attempt_id: Any) -> bool:
+    started = _IN_FLIGHT_ATTEMPTS.get(str(attempt_id or ""))
+    if started is None:
+        return False
+    if time.monotonic() - started > IN_FLIGHT_ATTEMPT_MAX_SECONDS:
+        _IN_FLIGHT_ATTEMPTS.pop(str(attempt_id), None)
+        return False
+    return True
 
 
 def _runtime(hass: Any, entry: Any) -> dict[str, Any] | None:
@@ -1326,6 +1344,11 @@ async def async_load_recovery_state(
         if not await _save_sidecar(hass, entry, runtime, state):
             runtime[_SIDECAR_HOLD_KEY] = "recovery_interrupted_save_failed"
             return False
+    if _prune_released_history(state, runtime, time.time()):
+        _next_revision(state)
+        # Housekeeping only: an unsaved prune means the old records come back
+        # at the next load, never a lost obligation, so a failure is ignored.
+        await _save_sidecar(hass, entry, runtime, state)
 
     runtime[_SIDECAR_STATE_KEY] = state
     runtime[_SIDECAR_LOADED_KEY] = True
@@ -1336,6 +1359,124 @@ async def async_load_recovery_state(
     # liability/incident records live in the sidecar above.
     runtime[RECOVERY_KEY] = deepcopy(state["recovery"])
     return True
+
+
+# Released recovery history is kept this long for support, then pruned at load.
+RELEASED_INCIDENT_RETENTION_SECONDS = 7 * 24 * 3600
+FINISHED_SUBMISSION_RETENTION_SECONDS = 24 * 3600
+_FINISHED_SUBMISSION_STATUSES = frozenset({"completed", "not_sent", "error"})
+
+
+def _old_enough(value: Any, now: float, retention: float) -> bool:
+    return (type(value) in (int, float) and math.isfinite(value)
+            and now - value >= retention)
+
+
+def _prune_released_history(state: dict[str, Any], runtime: Mapping[str, Any], now: float) -> int:
+    """Drop recovery history that can no longer affect any command.
+
+    Removes incidents released more than a week ago (never one awaiting
+    activation), with their own released obligation and liability record,
+    and submissions that finished more than a day ago and are no longer
+    tracked as a running provider task. Pending, held and untimestamped
+    records are always kept, as is the per-vehicle ledger. Returns the
+    number of records removed.
+    """
+    removed = 0
+    incidents = state.get("incidents")
+    obligations = state.get("obligations")
+    liabilities = state.get("liabilities")
+    if isinstance(incidents, dict):
+        for incident_id, incident in list(incidents.items()):
+            if (not isinstance(incident, dict) or incident.get("phase") != "released"
+                    or incident.get("activation_pending")
+                    or not _old_enough(incident.get("released_at"), now,
+                                       RELEASED_INCIDENT_RETENTION_SECONDS)):
+                continue
+            obligation = obligations.get(incident_id) if isinstance(obligations, dict) else None
+            if obligation is not None and (
+                not isinstance(obligation, dict) or obligation.get("phase") != "released"
+            ):
+                continue
+            del incidents[incident_id]
+            removed += 1
+            if isinstance(obligations, dict) and obligations.pop(incident_id, None) is not None:
+                removed += 1
+            if isinstance(liabilities, dict) and liabilities.pop(incident_id, None) is not None:
+                removed += 1
+    submissions = state.get("submissions")
+    tracked = runtime.get(_SUBMISSIONS_KEY) or {}
+    if isinstance(submissions, dict):
+        for submission_id, record in list(submissions.items()):
+            if (submission_id in tracked or not isinstance(record, dict)
+                    or record.get("status") not in _FINISHED_SUBMISSION_STATUSES
+                    or not _old_enough(record.get("completed_at"), now,
+                                       FINISHED_SUBMISSION_RETENTION_SECONDS)):
+                continue
+            del submissions[submission_id]
+            removed += 1
+    return removed
+
+
+# Holds where the durable recovery evidence is already gone or unreadable. Every
+# restart reproduces them, so without an explicit reset they block all positive
+# Tesla commands for good. Other holds (load or save failures) can clear on a
+# reload and are never reset here.
+RESETTABLE_SIDECAR_HOLDS = frozenset({"sidecar_missing", "sidecar_malformed"})
+
+
+async def async_reset_recovery_store(
+    hass: Any, entry: Any, *, confirm_vehicles_checked: bool,
+) -> dict[str, Any]:
+    """Start a fresh recovery journal after its stored evidence was lost.
+
+    Only for ``RESETTABLE_SIDECAR_HOLDS`` and only with the user's explicit
+    confirmation that every Tesla on this entry is stopped or in a known
+    state: the lost journal can no longer say which commands were uncertain.
+    An unreadable journal is kept in a backup store before it is replaced.
+    The reset is recorded in the new journal.
+    """
+    runtime = _runtime(hass, entry)
+    if runtime is None:
+        return {"success": False, "error": "entry_unavailable"}
+    hold = runtime.get(_SIDECAR_HOLD_KEY)
+    if hold not in RESETTABLE_SIDECAR_HOLDS:
+        return {"success": False, "error": "no_resettable_hold", "hold": hold}
+    if confirm_vehicles_checked is not True:
+        return {"success": False, "error": "confirmation_required", "hold": hold}
+    store = _sidecar_store(hass, entry, runtime)
+    if store is None or not hasattr(store, "async_save"):
+        return {"success": False, "error": "store_unavailable", "hold": hold}
+    reset_at = datetime.now(timezone.utc).isoformat()
+    backup_saved = False
+    if hold == "sidecar_malformed":
+        try:
+            raw = await store.async_load()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raw = None
+        try:
+            from homeassistant.helpers.storage import Store
+
+            backup = Store(hass, 1, f"{_sidecar_key(entry)}.reset_backup", atomic_writes=True)
+            await backup.async_save({"reset_at": reset_at, "hold": hold, "data": raw})
+            backup_saved = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return {"success": False, "error": "backup_failed", "hold": hold}
+    state = _new_sidecar()
+    state["operator_reset"] = {"at": reset_at, "hold": hold}
+    if not await _save_sidecar(hass, entry, runtime, state):
+        return {"success": False, "error": "save_failed", "hold": hold}
+    loaded = await async_load_recovery_state(hass, entry, enrolled=True)
+    return {
+        "success": loaded,
+        "previous_hold": hold,
+        "backup_saved": backup_saved,
+        **({} if loaded else {"error": "reload_failed", "hold": runtime.get(_SIDECAR_HOLD_KEY)}),
+    }
 
 
 def _sidecar_ready(runtime: dict[str, Any]) -> bool:
@@ -3252,10 +3393,12 @@ async def async_begin_attempt(
         except asyncio.CancelledError:
             await _restore_after_cancel(hass, entry, runtime, before)
             raise
+        _IN_FLIGHT_ATTEMPTS[attempt_id] = time.monotonic()
         return RecoveryTicket(hass, entry, vid, attempt_id, deepcopy(pinned), runtime)
 
 
 async def async_finish_attempt(ticket: RecoveryTicket, outcome: Any) -> bool:
+    _IN_FLIGHT_ATTEMPTS.pop(str(ticket.attempt_id), None)
     runtime = _runtime(ticket.hass, ticket.entry)
     normalized = str(getattr(outcome, "value", outcome) or "").lower().strip()
     if (runtime is None or runtime.get(_RECOVERY_STOPPING_KEY) is True
@@ -3616,6 +3759,71 @@ async def async_resume_completed_native_route(hass, entry, vehicle_id, *, author
         expected_identity=expected_identity, mode="positive_resume", authorize=current)
 
 
+async def async_release_ended_native_route(hass, entry, vehicle_id, *, authorize):
+    """Release a settled native session pin once no controller owns the car.
+
+    A native route stays pinned to the ownership lease that started it. When
+    that lease ends without a confirmed Stop (for example a restart cleared
+    ownership), the pin no longer matches anything and would block every
+    later command. Release it only when nobody owns the vehicle, the exact
+    producer binding is unchanged, and nothing about the route is unresolved:
+    no unknown attempt, hazard, cleanup fence or pending obligation. No
+    command is sent or replayed; the next command selects its route normally.
+    """
+    import sys
+    from .tesla_native_recovery import ACTIVE_KEY, _no_writers
+
+    runtime = _runtime(hass, entry)
+    vid = str(vehicle_id or "")
+    if runtime is None or not vid:
+        return False
+    if _session_scope(_owner_snapshot(hass, entry, vid)) is not None:
+        return False
+    generation = current_vehicle_generation(hass, entry, vid)
+    async with _journal_lock(runtime):
+        ledger = _ledger(runtime, vid, create=False)
+        route = ledger.get("route") if isinstance(ledger, Mapping) else None
+        if (not isinstance(route, Mapping) or route.get("kind") != "ha"
+                or route.get("vehicle_id") not in (None, vid)
+                or not isinstance(route.get("session_scope"), Mapping)
+                or route.get("cleanup_only") is True):
+            return False
+        if (_runtime(hass, entry) is not runtime or not _sidecar_ready(runtime)
+                or runtime.get(_SIDECAR_HOLD_KEY) is not None
+                or runtime.get(_RECOVERY_STOPPING_KEY)
+                or runtime.get(ACTIVE_KEY) is not None
+                or not recovery_control_allowed(hass, entry, vid, generation, "start")
+                or _journal_malformed(runtime, vid)
+                or _unresolved_routes(ledger)
+                or any(not item.get("recovery_retired") for item in _hazards(ledger))
+                or any(vid in runtime[_SIDECAR_STATE_KEY].get("obligations", {}).get(family, {})
+                       for family in ("ev_boost_sessions", "ev_quick_control_obligations"))
+                or _session_scope(_owner_snapshot(hass, entry, vid)) is not None
+                or not _no_writers(sys.modules[__name__], hass, vid)
+                or authorize() is not True):
+            return False
+        binding_route = deepcopy(dict(route))
+        binding_route.pop("session_scope", None)
+        if not _compatible(hass, entry, runtime, vid, binding_route):
+            return False
+        before = _snapshot_recovery(runtime)
+        ledger["route"] = None
+        try:
+            if not await _persist(hass, entry, runtime):
+                _restore_recovery(runtime, before)
+                return False
+        except asyncio.CancelledError:
+            await _restore_after_cancel(hass, entry, runtime, before)
+            raise
+    import logging
+
+    logging.getLogger(__name__).info(
+        "EV recovery: released the native route for vehicle ...%s; its charging "
+        "session ended with nothing unresolved", vid[-4:],
+    )
+    return True
+
+
 def _ble_binding(hass: Any, prefix: str, charger: str) -> dict[str, Any] | None:
     ids = (charger, f"switch.{prefix}_ble_connection", f"binary_sensor.{prefix}_ble_status")
     entities = [_identity(hass, item) for item in ids]
@@ -3763,7 +3971,9 @@ def _isolation_valid(hass: Any, hazard: Mapping[str, Any]) -> bool:
             and samples["fence"]["request_id"] == request_id)
 
 
-def _unresolved_routes(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+def _unresolved_routes(
+    ledger: Mapping[str, Any], *, include_in_flight: bool = True,
+) -> list[Mapping[str, Any]]:
     """Return producer routes whose command effect remains unresolved."""
     attempts = ledger.get("attempts", {})
     routes = []
@@ -3772,6 +3982,10 @@ def _unresolved_routes(ledger: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         if (isinstance(route, Mapping) and route.get("kind") in ROUTE_KINDS
                 and not record.get("recovery_retired")
                 and record.get("outcome", "pending") in ("pending", "sent_unknown")):
+            if (not include_in_flight
+                    and record.get("outcome", "pending") == "pending"
+                    and _attempt_in_flight(record.get("attempt_id"))):
+                continue
             routes.append(route)
     for hazard in _hazards(ledger):
         if (hazard.get("kind") == "ble_quarantine"
@@ -3808,6 +4022,9 @@ def ev_headroom_recovery_status(hass, entry, vin):
 
     status = {
         "sidecar_hold_present": runtime.get("_tesla_ev_recovery_sidecar_hold") is not None,
+        # The reason, so a user can tell a lost store (reset_ev_recovery_store)
+        # from a transient load or save failure.
+        "sidecar_hold": runtime.get("_tesla_ev_recovery_sidecar_hold"),
         "control_route": verdict(route), "settlement_route": verdict(settlement_route),
     }
     budget = hass.data.get(RUNTIME_KEY)
@@ -4202,7 +4419,15 @@ async def async_expire_settled_ble_attempts(
         return True, f"retired {len(pending)} settled BLE attempt(s){released}"
 
 
-def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] | None:
+def get_vehicle_route(
+    hass: Any, entry: Any, vehicle_id: Any, *, include_in_flight: bool = True,
+) -> dict[str, Any] | None:
+    """Resolve the command route for a vehicle.
+
+    Control callers keep the default so a command still being sent blocks an
+    overlapping one. Status readers pass ``include_in_flight=False`` so a
+    normal command in progress is not reported as a recovery hold.
+    """
     vid = str(vehicle_id or "")
     runtime = _runtime(hass, entry)
     if runtime is None:
@@ -4219,7 +4444,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
         return None
     route = ledger.get("route")
     if not isinstance(route, Mapping):
-        unresolved = _unresolved_routes(ledger)
+        unresolved = _unresolved_routes(ledger, include_in_flight=include_in_flight)
         return _blocked(vid, unresolved[0], _unresolved_route_reason(unresolved)) if unresolved else None
     if route.get("kind") not in ROUTE_KINDS:
         return _blocked(vid, route, "malformed_recovery")
@@ -4235,7 +4460,7 @@ def get_vehicle_route(hass: Any, entry: Any, vehicle_id: Any) -> dict[str, Any] 
             return _blocked(vid, route, "malformed_recovery")
         if hazard.get("state") == "isolated" and route.get("kind") == "ble":
             return _blocked(vid, route, "ble_recovery")
-    unresolved = _unresolved_routes(ledger)
+    unresolved = _unresolved_routes(ledger, include_in_flight=include_in_flight)
     if unresolved:
         if (route.get("kind") != "ha"
                 or any(item.get("kind") != "ble" for item in unresolved)
@@ -4307,7 +4532,13 @@ def pending_ble_attempt(hass: Any, entry: Any, vehicle_id: Any) -> RecoveryTicke
     return None
 
 
-def ble_quarantined(hass: Any, prefix: str) -> bool:
+def ble_quarantined(hass: Any, prefix: str, *, include_in_flight: bool = True) -> bool:
+    """Return whether retained BLE command history holds this bridge.
+
+    Control gates keep the default so a second command cannot overlap one
+    still being sent. Status readers pass ``include_in_flight=False``: a
+    command this process is still sending is not a stuck hold.
+    """
     data = getattr(hass, "data", {}).get(DOMAIN, {})
     if not isinstance(data, Mapping):
         return True
@@ -4331,6 +4562,10 @@ def ble_quarantined(hass: Any, prefix: str) -> bool:
                 if (route.get("kind") == "ble" and not record.get("recovery_retired")
                         and str(route.get("prefix")) == str(prefix)
                         and record.get("outcome", "pending") in ("pending", "sent_unknown")):
+                    if (not include_in_flight
+                            and record.get("outcome", "pending") == "pending"
+                            and _attempt_in_flight(record.get("attempt_id"))):
+                        continue
                     return True
             for hazard in _hazards(ledger):
                 if (hazard.get("kind") == "ble_quarantine" and not hazard.get("recovery_retired")

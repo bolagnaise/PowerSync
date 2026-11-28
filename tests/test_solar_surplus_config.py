@@ -122,3 +122,48 @@ def test_solar_price_gate_blocks_high_or_missing_price_but_allows_deadline():
         config,
         deadline_override=True,
     ) is True
+
+
+# --- Shared surplus reserves -----------------------------------------------------
+
+from power_sync.solar_surplus_config import (  # noqa: E402
+    forecast_ev_surplus_kw,
+    get_household_buffer_kw,
+    get_parallel_charge_rate_kw,
+    parallel_battery_reserve_kw,
+)
+
+
+def test_household_buffer_defaults_and_rejects_bad_values():
+    assert get_household_buffer_kw(None) == 0.5
+    assert get_household_buffer_kw({"household_buffer_kw": 1.2}) == 1.2
+    assert get_household_buffer_kw({"household_buffer_kw": -3}) == 0.0
+    assert get_household_buffer_kw({"household_buffer_kw": "bad"}) == 0.5
+    assert get_household_buffer_kw({"household_buffer_kw": float("nan")}) == 0.5
+
+
+def test_parallel_charge_rate_only_applies_when_enabled():
+    assert get_parallel_charge_rate_kw({"max_battery_charge_rate_kw": 3}) == 0.0
+    on = {"allow_parallel_charging": True}
+    assert get_parallel_charge_rate_kw(on) == 5.0
+    assert get_parallel_charge_rate_kw({**on, "max_battery_charge_rate_kw": 3}) == 3.0
+    assert get_parallel_charge_rate_kw({**on, "max_battery_charge_rate_kw": 0}) == 0.0
+    assert get_parallel_charge_rate_kw({**on, "max_battery_charge_rate_kw": None}) == 0.0
+    assert get_parallel_charge_rate_kw({**on, "max_battery_charge_rate_kw": "bad"}) == 5.0
+
+
+def test_live_parallel_reserve_follows_battery_state():
+    config = {"allow_parallel_charging": True, "max_battery_charge_rate_kw": 4.0, "min_battery_soc": 80}
+    assert parallel_battery_reserve_kw(config, 50, 0.0, "grid_based") == 4.0  # below minimum
+    assert parallel_battery_reserve_kw(config, 90, 0.0, "grid_based") == 0.0  # idle above minimum
+    assert parallel_battery_reserve_kw(config, 90, 1.0, "grid_based") == 4.0  # charging
+    assert parallel_battery_reserve_kw(config, 90, 1.0, "direct") == 3.0      # tops up measured charge
+    assert parallel_battery_reserve_kw(config, 99, 1.0, "grid_based") == 0.0  # full
+    assert parallel_battery_reserve_kw({}, 50, 1.0, "grid_based") == 0.0      # disabled
+
+
+def test_forecast_surplus_withholds_buffer_and_parallel_rate():
+    assert forecast_ev_surplus_kw(4.0, 1.0, None) == 2.5
+    config = {"household_buffer_kw": 0.0, "allow_parallel_charging": True, "max_battery_charge_rate_kw": 2.0}
+    assert forecast_ev_surplus_kw(4.0, 1.0, config) == 1.0
+    assert forecast_ev_surplus_kw(1.0, 2.0, None) == 0.0

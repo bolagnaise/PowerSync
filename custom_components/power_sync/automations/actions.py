@@ -161,23 +161,7 @@ API_CREDIT_ERROR_PATTERNS = [
 # Battery energy coordinators expose the same normalized kW telemetry contract.
 # Keep this list explicit so EV control does not accidentally fall back to a
 # provider-specific raw API when a supported inverter coordinator is present.
-EV_LIVE_STATUS_COORDINATOR_KEYS = (
-    "tesla_coordinator",
-    "sigenergy_coordinator",
-    "sungrow_coordinator",
-    "foxess_coordinator",
-    "goodwe_coordinator",
-    "alphaess_coordinator",
-    "esy_sunhome_coordinator",
-    "solax_coordinator",
-    "saj_h2_coordinator",
-    "fronius_reserva_coordinator",
-    "neovolt_coordinator",
-    "solaredge_coordinator",
-    "anker_solix_coordinator",
-    "amber_smartshift_coordinator",
-    "custom_energy_coordinator",
-)
+from .live_status import SITE_LIVE_STATUS_COORDINATOR_KEYS as EV_LIVE_STATUS_COORDINATOR_KEYS  # noqa: E402
 
 
 def _is_api_credit_error(error_message: str) -> bool:
@@ -1733,6 +1717,43 @@ def _has_fresh_scheduled_ble_stop(
     return amps is not None
 
 
+# How long a Scheduled Tesla may sit silently stopped before its stale control
+# is released so Scheduled can start it again.
+SCHEDULED_QUIET_STOP_RELEASE_SECONDS = 15 * 60
+
+
+def _reading_shows_draw(reading: Any) -> bool:
+    try:
+        return reading is not None and float(reading.state) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _scheduled_tesla_last_known_stopped(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_id: str, native_status: str | None,
+    native_readings: tuple = (),
+) -> bool:
+    """Whether the car last reported Stopped and no reading of any age shows draw."""
+    if native_status is not None:
+        return native_status == "stopped" and not any(map(_reading_shows_draw, native_readings))
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state,
+    )
+
+    config = {**config_entry.data, **config_entry.options}
+    prefix = vehicle_id[4:]
+    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE or prefix not in resolve_ble_prefixes(hass, config):
+        return False
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    if str(getattr(charging, "state", "")).strip().lower() != "stopped":
+        return False
+    return not any(map(_reading_shows_draw, (
+        get_tesla_ble_charge_power_state(hass, prefix),
+        get_tesla_ble_charge_current_state(hass, prefix),
+    )))
+
+
 async def _release_stopped_scheduled_tesla(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1757,6 +1778,8 @@ async def _release_stopped_scheduled_tesla(
 
     started_at = state.get("last_start_command_at")
     native_confirmed = False
+    native_status = None
+    native_readings: tuple = ()
     if not vehicle_id.startswith("ble_"):
         entity_id = await _get_tesla_ev_entity(
             hass, r"sensor\..*_(charging_state|charging|charge_state)(?:_\d+)?$",
@@ -1780,6 +1803,7 @@ async def _release_stopped_scheduled_tesla(
         )
         power_kw, power_available = await _get_observed_ev_power_reading_kw(hass, vehicle_id, {})
         current = hass.states.get(current_entity) if current_entity else None
+        native_readings = (current,)
         amps, _error, _age = _phase_current_state_amps(current)
         if (
             (entity_id is not None and hass.states.get(entity_id) is not charging)
@@ -1793,16 +1817,41 @@ async def _release_stopped_scheduled_tesla(
             and (amps is not None or power_available)
         )
 
+    # A car that stops mid-window and then sleeps never sends the fresh report
+    # above, which held Scheduled ("control active") until the window ended.
+    # After a quiet period its last known Stopped, with no current reading of
+    # any age (and, for BLE, no power reading of any age) showing draw, lets
+    # Scheduled re-check and start again. Releasing never sends a Stop. Each new Start
+    # resets the clock, so retries stay at most one per quiet period.
+    quiet_stop = (
+        isinstance(started_at, datetime)
+        and (
+            datetime.now(started_at.tzinfo) if started_at.tzinfo else datetime.now()
+        ) - started_at >= timedelta(seconds=SCHEDULED_QUIET_STOP_RELEASE_SECONDS)
+        and _scheduled_tesla_last_known_stopped(
+            hass, config_entry, vehicle_id,
+            native_status if not vehicle_id.startswith("ble_") else None,
+            native_readings,
+        )
+    )
+
     # A concurrent Start can transfer the dynamic controller in place.
     if _start_dynamic_lock.locked():
         return False
     async with _start_dynamic_lock:
-        if not native_confirmed and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at):
+        if (
+            not native_confirmed
+            and not _has_fresh_scheduled_ble_stop(hass, config_entry, vehicle_id, started_at)
+            and not quiet_stop
+        ):
             return False
         await _action_stop_ev_charging_dynamic(hass, config_entry, {
             "vehicle_id": vehicle_id,
             "stop_charging": False,
-            "stop_reason": "Scheduled Tesla reports stopped and zero draw",
+            "stop_reason": (
+                "Scheduled Tesla reports stopped and zero draw" if not quiet_stop
+                or native_confirmed else "Scheduled Tesla stayed stopped and quiet"
+            ),
             "_expected_state": state,
             "_expected_lease": lease,
         })
@@ -2140,38 +2189,16 @@ def _effective_ev_power_kw(
     charging_state: Optional[str] = None,
     restart_telemetry_pending: bool = False,
 ) -> float:
-    """Resolve the EV load used for surplus accounting.
+    """Resolve the EV load used for surplus accounting (see ``surplus_ev_power_kw``)."""
+    from ..ev_load import surplus_ev_power_kw
 
-    A usable positive meter reading is the best representation of the load
-    after the short post-restart grace. During that grace, retain the larger
-    of the command and reading while telemetry catches up. A prior command is
-    otherwise only a fallback when the meter has no numeric value. An explicit
-    stopped Tesla with an available numeric zero remains a safe exception.
-    """
-    try:
-        commanded_kw = max(0.0, float(commanded_power_kw))
-    except (TypeError, ValueError):
-        commanded_kw = 0.0
-    try:
-        observed_kw = max(0.0, float(observed_power_kw))
-    except (TypeError, ValueError):
-        observed_kw = 0.0
-
-    if restart_telemetry_pending:
-        return max(commanded_kw, observed_kw)
-
-    if observed_power_available and observed_kw > _ACTIVE_EV_POWER_EPSILON_KW:
-        return observed_kw
-
-    if (
-        observed_power_available
-        and observed_kw <= _ACTIVE_EV_POWER_EPSILON_KW
-        and charging_state in _TESLA_NON_CHARGING_STATES
-        and not restart_telemetry_pending
-    ):
-        return 0.0
-
-    return commanded_kw
+    return surplus_ev_power_kw(
+        commanded_power_kw,
+        observed_power_kw,
+        observed_power_available,
+        reported_stopped=charging_state in _TESLA_NON_CHARGING_STATES,
+        restart_telemetry_pending=restart_telemetry_pending,
+    )
 
 
 async def _is_vehicle_charge_complete(
@@ -4742,6 +4769,18 @@ def _tesla_cleanup_persistence_refused(
     )
 
 
+def _mark_boost_start_submitted(params: Dict[str, Any], operation: str, ticket: Any) -> None:
+    """Record on a Boost start result that a Tesla writer opened a Start.
+
+    Every Tesla writer opens a recovery-journal attempt before writing. Boost
+    uses the absence of this mark to tell a Start refused before dispatch (for
+    example by a recovery hold) from one whose outcome is genuinely unknown.
+    """
+    result = params.get("_boost_start_result")
+    if isinstance(result, dict) and operation == "start" and ticket is not None:
+        result["submitted"] = True
+
+
 def _tesla_cleanup_persistence_marker(ticket: Any) -> bool:
     """Return whether recovery classified this ticket as cleanup-only."""
     route = getattr(ticket, "route", None)
@@ -6335,6 +6374,17 @@ async def _tesla_transport_route(hass, entry, params, operation):
 
         if await async_resume_completed_native_route(hass, entry, vehicle, authorize=can_resume):
             route = get_vehicle_route(hass, entry, vehicle)
+    if (operation != "stop" and route and route.get("reason") == "route_identity_changed"):
+        # The pinned session ended with nobody owning the car (for example a
+        # restart cleared ownership). Release the settled pin instead of
+        # refusing every later command for this vehicle.
+        from ..tesla_ev_recovery import async_release_ended_native_route
+
+        release_authority = _tesla_transport_authority(
+            hass, entry, params, operation=operation, ignore_recovery_gate=True)
+        if await async_release_ended_native_route(
+                hass, entry, vehicle, authorize=release_authority):
+            route = get_vehicle_route(hass, entry, vehicle)
     if (operation != "stop" and route and route.get("reason") == "native_recovery"):
         await _tesla_reconcile_native_history(hass, entry, params)
         route = get_vehicle_route(hass, entry, vehicle)
@@ -6555,6 +6605,7 @@ async def _run_ble_transport_command(
     entity_identity_unchanged = (
         _tesla_legacy_entity_identity(hass, (entity,)) == pinned_entity_identity
     )
+    _mark_boost_start_submitted(params, operation, ticket)
     if (
         _tesla_cleanup_persistence_marker(ticket)
         and (
@@ -6824,6 +6875,7 @@ async def _run_teslemetry_bt_transport_command(
     entity_identity_unchanged = (
         _tesla_legacy_entity_identity(hass, (entity,)) == pinned_identity
     )
+    _mark_boost_start_submitted(params, operation, ticket)
     if (
         _tesla_cleanup_persistence_marker(ticket)
         and (
@@ -7440,6 +7492,7 @@ async def _run_native_tesla_service_command(
         # The journal admission itself failed before a service write.
         return _TeslaNativeMutationResult("not_sent", err)
 
+    _mark_boost_start_submitted(params, operation, ticket)
     if (
         _tesla_cleanup_persistence_marker(ticket)
         and (
@@ -7945,6 +7998,7 @@ async def _run_modern_teslemetry_bluetooth(hass, entry, params, operation, value
                 cleanup_direct["active"] = True
                 return True
             raise
+        _mark_boost_start_submitted(params, operation, ticket)
         if (
             _tesla_cleanup_persistence_marker(ticket)
             and (
@@ -11960,7 +12014,7 @@ _smart_schedule_effective_authorizations: Dict[
     str, Dict[str, Dict[str, Any]]
 ] = {}
 _SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS = 90
-_BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
+from ..solar_surplus_config import BATTERY_FULL_RESERVE_BYPASS_SOC as _BATTERY_FULL_RESERVE_BYPASS_SOC  # noqa: E402
 _BATTERY_TAPER_BYPASS_SOC = 95.0
 _BATTERY_TARGET_SHORTFALL_KW = 0.2
 _SITE_HEADROOM_EPSILON_KW = 0.1
@@ -12829,34 +12883,11 @@ def _parallel_battery_reserve_kw(
     battery_charge_kw: float,
 ) -> float:
     """Return the extra battery charge reserve to withhold from EV surplus."""
-    if not config.get("allow_parallel_charging", False):
-        return 0.0
+    from ..solar_surplus_config import parallel_battery_reserve_kw
 
-    try:
-        max_charge_kw = max(0.0, float(config.get("max_battery_charge_rate_kw", 5.0) or 0.0))
-    except (TypeError, ValueError):
-        max_charge_kw = 5.0
-    if max_charge_kw <= 0:
-        return 0.0
-
-    battery_soc = live_status.get("battery_soc")
-    try:
-        battery_soc = float(battery_soc) if battery_soc is not None else None
-    except (TypeError, ValueError):
-        battery_soc = None
-
-    if battery_soc is not None and battery_soc >= _BATTERY_FULL_RESERVE_BYPASS_SOC:
-        return 0.0
-
-    min_soc = get_solar_surplus_min_battery_soc(config)
-    battery_below_min = battery_soc is not None and battery_soc < min_soc
-    battery_currently_charging = battery_charge_kw > 0.05
-    if not battery_below_min and not battery_currently_charging:
-        return 0.0
-
-    if method == "direct":
-        return max(0.0, max_charge_kw - battery_charge_kw)
-    return max_charge_kw
+    return parallel_battery_reserve_kw(
+        config, live_status.get("battery_soc"), battery_charge_kw, method,
+    )
 
 
 def _curtailed_full_battery_active_ev(
@@ -12998,7 +13029,9 @@ def _calculate_solar_surplus(
     solar_kw = (live_status.get("solar_power") or 0) / 1000
     grid_kw = (live_status.get("grid_power") or 0) / 1000  # Positive = import, Negative = export
     battery_kw = (live_status.get("battery_power") or 0) / 1000  # Positive = discharge, Negative = charge
-    buffer_kw = config.get("household_buffer_kw", 0.5)
+    from ..solar_surplus_config import get_household_buffer_kw
+
+    buffer_kw = get_household_buffer_kw(config)
     if _curtailed_full_battery_active_ev(live_status, current_ev_power_kw):
         buffer_kw = 0.0
 
@@ -14333,43 +14366,9 @@ def _is_inside_time_window(
 
 def _coordinator_has_normalized_ev_live_data(coordinator: Any) -> bool:
     """Return whether a battery coordinator has a usable normalized snapshot."""
-    if getattr(coordinator, "last_update_success", None) is not True:
-        return False
-    data = getattr(coordinator, "data", None)
-    if not isinstance(data, dict) or data.get("telemetry_ready") is False:
-        return False
-    for key in ("grid_power", "solar_power", "battery_power"):
-        value = data.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return False
-        if not math.isfinite(float(value)):
-            return False
+    from .live_status import coordinator_snapshot_is_usable
 
-    last_update = getattr(coordinator, "last_update_success_time", None)
-    if last_update is None:
-        return True
-    try:
-        update_interval = getattr(coordinator, "update_interval", None)
-        stale_after = max(
-            update_interval * 4
-            if update_interval is not None
-            else timedelta(seconds=120),
-            timedelta(seconds=60),
-        )
-        now = dt_util.utcnow()
-        if (
-            getattr(now, "tzinfo", None) is None
-            and getattr(last_update, "tzinfo", None) is not None
-        ):
-            now = now.replace(tzinfo=last_update.tzinfo)
-        elif (
-            getattr(now, "tzinfo", None) is not None
-            and getattr(last_update, "tzinfo", None) is None
-        ):
-            last_update = last_update.replace(tzinfo=now.tzinfo)
-        return (now - last_update) <= stale_after
-    except Exception:
-        return False
+    return coordinator_snapshot_is_usable(coordinator, dt_util.utcnow())
 
 
 async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[Dict[str, Any]]:
@@ -14381,25 +14380,14 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
         - grid_power: Positive = importing, Negative = exporting
     """
     from ..const import DOMAIN
-    from .live_status import coordinator_data_to_ev_live_status
+    from .live_status import site_live_status
 
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
 
-    # Try normalized coordinator data first (cached, no API call needed).
-    coordinator_found = False
-    for coord_key in EV_LIVE_STATUS_COORDINATOR_KEYS:
-        coordinator = entry_data.get(coord_key)
-        if coordinator is None:
-            continue
-        coordinator_found = True
-        if _coordinator_has_normalized_ev_live_data(coordinator):
-            live_status = coordinator_data_to_ev_live_status(coordinator.data)
-            if entry_data.get("inverter_last_state") == "curtailed":
-                live_status["is_curtailed"] = True
-                live_status["ac_production_curtailed"] = True
-            # A separate AC inverter being normal does not release a native
-            # hybrid's site-export limit. Preserve its coordinator readback.
-            return live_status
+    # Normalized coordinator data first (cached, no API call needed).
+    live_status, coordinator_found = site_live_status(entry_data, dt_util.utcnow())
+    if live_status is not None:
+        return live_status
 
     # A configured but unhealthy coordinator must not be bypassed by a raw
     # provider API call.  The coordinator is the canonical site telemetry path.
@@ -17004,6 +16992,18 @@ async def _dynamic_ev_update_surplus(
             # without attributing that stop to our unsuccessful command.
             state.pop("stop_outcome", None)
             state["low_surplus_start"] = None
+        if state.pop("transport_recovery_pending", None):
+            # Fresh Stopped at 0 kW after the post-command grace settles an
+            # uncertain Start. Keeping the flag reserved draw the car does not
+            # have and kept solar headroom discovery refused, so on a zero-export
+            # site the hidden surplus could never let the session start again.
+            # A later Start follows the normal sustained-surplus path.
+            state["current_amps"] = 0
+            state["target_amps"] = 0
+            _LOGGER.info(
+                "Solar surplus EV: %s reports stopped at 0 kW; the uncertain Start is settled",
+                vehicle_id,
+            )
     elif current_amps <= 0 and observed_current_power_kw > 0.05:
         effective_current_amps = max(1, int(round((observed_current_power_kw * 1000) / (voltage * phases))))
 
@@ -17220,7 +17220,11 @@ async def _dynamic_ev_update_surplus(
                     return
 
                 # Send the actual start-charging command to the vehicle.
-                if state.get("transport_recovery_pending") and not _tesla_dynamic_restart_due(state):
+                if (
+                    state.get("transport_recovery_pending")
+                    or state.get("physical_restart_required")
+                ) and not _tesla_dynamic_restart_due(state):
+                    # Restarts stay bounded after an uncertain Start is settled.
                     return
                 start_params = dict(params)
                 if start_params.get("charger_type") in {"sigenergy", "tesla"}:
@@ -17396,6 +17400,11 @@ async def _dynamic_ev_update_surplus(
                 # mistaking post-stop telemetry lag for a driver override.
                 state["external_start_detection_armed"] = False
                 state["charging_started"] = False
+                # A successful Stop settles an earlier uncertain Start: there is
+                # no possible draw left to reserve. Leaving the flag set kept
+                # solar headroom discovery refused, so on a zero-export site
+                # the hidden surplus could never let the session start again.
+                state.pop("transport_recovery_pending", None)
                 state["last_stop_command_at"] = datetime.now().astimezone()
             if applied_amps != new_amps:
                 state["reason"] = state["reason"].replace(
@@ -21838,8 +21847,13 @@ def _solar_controller_waited_without_start(state: dict) -> bool:
     )
 
 
-def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bool:
-    """Prove that an idle Smart Schedule solar controller needs no BLE Stop."""
+def _waiting_ble_tesla_is_stopped(hass, entry, vehicle_id, state) -> bool:
+    """Prove that a waiting BLE-only solar controller needs no BLE Stop.
+
+    Used by Solar Surplus and Smart Schedule's solar priority. The proof needs a
+    fresh native power packet from the vehicle's own bridge pairing Stopped with
+    0 kW, so a stale or unpaired "Stopped" still gets a real Stop.
+    """
     from ..tesla_ble_recovery_status import ble_recovery_status
     from ..tesla_ev_recovery import (
         current_vehicle_generation, get_vehicle_route, recovery_control_allowed,
@@ -21866,42 +21880,102 @@ def _waiting_smart_schedule_ble_is_stopped(hass, entry, vehicle_id, state) -> bo
     return (
         history.get("success") is True
         and history.get("recovery", {}).get("required") is False
-        and _tesla_ble_recovery_start_state(
-            hass, prefix, require_paired_charge_state=True,
-        ) == "stopped"
+        and _ble_bridge_proves_stopped(hass, prefix) is not None
     )
+
+
+def _ble_bridge_proves_stopped(hass, prefix: str | None) -> datetime | None:
+    """Return when the car's own bridge proved it Stopped at 0 kW, else None.
+
+    One rule for every path that skips Stop for a waiting car:
+    - Native bridge (power arrives in ``_sample`` packets): a fresh power
+      packet at 0 kW, with the Stopped state fresh since the bridge connected.
+      The state need not share the packet: an unchanged Stopped is not resent.
+    - Stock bridge: Stopped and 0 kW reported together (within a second) by
+      the same bridge since it connected, and 0 A if it has a current sensor.
+    Either way the bridge must be up and bound to this car, and a fresh or
+    newer positive current reading vetoes the proof.
+    """
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
+        get_tesla_ble_charging_state, get_tesla_ble_companion_state,
+        get_tesla_ble_connected_at, get_tesla_ble_connected_charge_sample_time,
+        get_tesla_ble_observed_at, tesla_ble_states_share_bridge,
+    )
+
+    if not prefix or not _is_ble_available(hass, prefix):
+        return None
+    if not _tesla_ble_radio_matches_target(hass, prefix, TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)):
+        return None
+    charging = get_tesla_ble_charging_state(hass, prefix)
+    power = get_tesla_ble_charge_power_state(hass, prefix)
+    current = get_tesla_ble_charge_current_state(hass, prefix)
+    if charging is None or power is None or str(charging.state).strip().lower() != "stopped":
+        return None
+    kw, available = _power_state_kw_reading(power)
+    try:
+        if not available or float(power.state) < 0 or kw > 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    if get_tesla_ble_companion_state(hass, power.entity_id, "_sample") is not None:
+        connected_at = get_tesla_ble_connected_at(hass, prefix)
+        if connected_at is None or not tesla_ble_states_share_bridge(hass, prefix, charging, power):
+            return None
+        power_at = get_tesla_ble_observed_at(hass, power)
+        state_at = get_tesla_ble_observed_at(hass, charging)
+        if any(
+            stamp is None or stamp <= connected_at or not is_current_ev_power_observation(stamp)
+            for stamp in (power_at, state_at)
+        ):
+            return None
+        current_required = False
+    else:
+        power_at = get_tesla_ble_connected_charge_sample_time(
+            hass, prefix, charging, power,
+            require_paired_charge_state=False, require_paired_measurement=False,
+        )
+        if not is_current_ev_power_observation(power_at):
+            return None
+        current_required = current is not None
+
+    if current is not None:
+        current_at = get_tesla_ble_observed_at(hass, current)
+        fresh_current = (
+            is_current_ev_power_observation(current_at)
+            and tesla_ble_states_share_bridge(hass, prefix, current)
+        )
+        try:
+            amps = float(current.state) if fresh_current else None
+        except (TypeError, ValueError):
+            amps = None
+        if amps is not None and (not math.isfinite(amps) or amps != 0):
+            return None
+        if current_required and (
+            amps is None
+            or get_tesla_ble_connected_charge_sample_time(
+                hass, prefix, charging, current,
+                require_paired_charge_state=False, require_paired_measurement=False,
+            ) is None
+        ):
+            return None
+    return power_at
 
 
 def _waiting_solar_bridge_is_stopped(hass, entry, vehicle_id, params) -> bool:
-    """Check whether the waiting Tesla's connected bridge proves it is idle."""
-    from ..tesla_ble import (
-        get_tesla_ble_charge_current_state, get_tesla_ble_charge_power_state,
-        get_tesla_ble_charging_state, get_tesla_ble_connected_charge_sample_time,
-    )
+    """Check whether the waiting Tesla's connected bridge proves it is idle.
 
-    prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
-    if not prefix or not _is_ble_available(hass, prefix):
+    On a BLE + Fleet install, Fleet must also show nothing newer than the
+    bridge's proof.
+    """
+    proved_at = _ble_bridge_proves_stopped(
+        hass, _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id),
+    )
+    if proved_at is None:
         return False
-    target = TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
-    if not _tesla_ble_radio_matches_target(hass, prefix, target):
-        return False
-    charging = get_tesla_ble_charging_state(hass, prefix)
-    if getattr(charging, "state", "").lower() != "stopped":
-        return False
-    power = get_tesla_ble_charge_power_state(hass, prefix)
-    current = get_tesla_ble_charge_current_state(hass, prefix)
-    # Stock ESPHome can report contemporaneous values without extra packets.
-    samples = []
-    for measured in (power, current):
-        stamp = get_tesla_ble_connected_charge_sample_time(
-            hass, prefix, charging, measured,
-            require_paired_charge_state=False, require_paired_measurement=False,
-        )
-        if not is_current_ev_power_observation(stamp) or float(measured.state) != 0:
-            return False
-        samples.append(stamp)
     physical = _tesla_physical_charging_snapshot(
-        hass, entry, vehicle_id, params, updated_after=min(samples),
+        hass, entry, vehicle_id, params, updated_after=proved_at,
     )
     return not physical["charging"] and not physical["fresh_measurements"]
 
@@ -21915,8 +21989,11 @@ async def _waiting_solar_tesla_is_stopped(
 
     if params.get("charger_type", "tesla") != "tesla" or not _solar_controller_waited_without_start(state):
         return False
-    route = get_vehicle_route(hass, entry, vehicle_id)
     provider = _get_ev_config(entry)["ev_provider"]
+    if provider == EV_PROVIDER_TESLA_BLE:
+        # No Fleet observation exists; only the bridge's paired packet can prove it.
+        return _waiting_ble_tesla_is_stopped(hass, entry, vehicle_id, state)
+    route = get_vehicle_route(hass, entry, vehicle_id)
     unbound_both = route is None and handoff in ("smart_schedule", "boost") and provider == EV_PROVIDER_BOTH
     if route is not None and (route.get("kind") != "ha" or route.get("cleanup_only")):
         return False
@@ -21964,7 +22041,7 @@ async def _waiting_solar_tesla_is_stopped(
                 return False
         else:
             prefix = _resolve_ble_prefix_for_vehicle(hass, entry, vehicle_id)
-            if not prefix or _tesla_ble_recovery_start_state(hass, prefix) != "stopped":
+            if _ble_bridge_proves_stopped(hass, prefix) is None:
                 return False
     observed = get_tesla_vehicle_observation(hass, vehicle_id, preferred_entity_id=entity)
     if not (
@@ -22245,6 +22322,10 @@ async def _action_stop_ev_charging_dynamic(
                                 and get_ev_quick_control_obligation(hass, config_entry, vid) is None)
                         ):
                             passive_vehicle_ids.add(vid)
+                            _LOGGER.info(
+                                "Releasing waiting Solar Surplus for %s without Stop: "
+                                "the car reports a fresh, verified stop", vid,
+                            )
                 except Exception:
                     _LOGGER.debug("Could not verify the waiting Tesla is stopped", exc_info=True)
 
@@ -22269,7 +22350,7 @@ async def _action_stop_ev_charging_dynamic(
                 and get_ev_quick_control_obligation(hass, config_entry, vid) is None
             ):
                 try:
-                    if _waiting_smart_schedule_ble_is_stopped(hass, config_entry, vid, state):
+                    if _waiting_ble_tesla_is_stopped(hass, config_entry, vid, state):
                         passive_vehicle_ids.add(vid)
                         _LOGGER.info("Releasing waiting Smart Schedule for %s without a BLE Stop", vid)
                 except Exception:
@@ -22292,6 +22373,9 @@ async def _action_stop_ev_charging_dynamic(
                 success=not (stop_charging and vid not in passive_vehicle_ids),
             )
             released_vehicle_ids.add(vid)
+            headroom_runtime = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("solar_ev_headroom")
+            if headroom_runtime is not None:
+                headroom_runtime.session_ended(vid, state)
             del vehicles[vid]
             if (
                 not stop_charging

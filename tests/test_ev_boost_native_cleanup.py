@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_ev_boost_timers import BoostHarness, VIN_A, VIN_B
+from test_ev_boost_timers import BoostHarness, VIN_A, VIN_B, _mark_submitted
 from test_tesla_ev_observation import (
     independent_source, observation, _charge,
     stub_native_vehicle_sources, bind_current_registry_helpers,
@@ -28,6 +28,8 @@ def cloud_boost(independent_source, stub_native_vehicle_sources,
         vehicle.device.identifiers = {(domain, VIN_A)}
         h.physical[VIN_A] = False
         h.fail_start.add(VIN_A)
+        # The failed Start reached the car's writer, so its outcome is unknown.
+        h.start_hook = lambda _vin, params: _mark_submitted(params)
         h.observation_overrides[VIN_A] = {'_charging_observed_at': h.now-timedelta(minutes=5)}
         monkeypatch.setattr(observation, 'time', SimpleNamespace(time=lambda: h.now.timestamp()))
         namespace = h.view._independent_boost_stopped.__func__.__globals__

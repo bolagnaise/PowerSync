@@ -9689,7 +9689,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 is_smart_schedule_grid_price_allowed,
             )
             from ..const import DOMAIN
-            from ..solar_surplus_config import get_stored_solar_surplus_config
+            from ..solar_surplus_config import (
+                get_parallel_charge_rate_kw,
+                get_stored_solar_surplus_config,
+            )
             from .ev_load_plan import ev_plan_from_demand, smart_schedule_charger_limits_kw
 
             executor = get_auto_schedule_executor()
@@ -9947,15 +9950,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             )
                         )
                         solar_reserve_kw = (
-                            max(
-                                0.0,
-                                float(
-                                    solar_surplus_config.get(
-                                        "max_battery_charge_rate_kw", 5.0
-                                    )
-                                    or 0.0
-                                ),
-                            )
+                            get_parallel_charge_rate_kw(solar_surplus_config)
                             if solar_exception
                             else 0.0
                         )

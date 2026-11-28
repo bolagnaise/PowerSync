@@ -138,32 +138,116 @@ def test_ev_live_status_uses_combined_sungrow_site_solar():
 
 def test_normal_ac_inverter_does_not_hide_native_zero_export_from_ev_controller():
     """Separate AC-inverter state must not erase native hybrid curtailment."""
+    from datetime import datetime, timezone
+    from power_sync.automations.live_status import site_live_status
+
     source = (ROOT / "automations/actions.py").read_text()
     node = next(n for n in ast.parse(source).body
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "_get_tesla_live_status")
+    assert "site_live_status(entry_data" in ast.get_source_segment(source, node)
 
-    class StripImports(ast.NodeTransformer):
-        def visit_ImportFrom(self, node):
-            return ast.copy_location(ast.Pass(), node)
-
-    coordinator = SimpleNamespace(data={
+    coordinator = SimpleNamespace(last_update_success=True, data={
         "battery_level": 100, "is_curtailed": True,
         "grid_power": 0, "solar_power": 1.2, "battery_power": 0,
     })
-    hass = SimpleNamespace(data={"power_sync": {"entry-id": {
-        "sigenergy_coordinator": coordinator, "inverter_last_state": "normal",
-    }}})
-    namespace = {
-        "HomeAssistant": object, "ConfigEntry": object,
-        "Optional": __import__("typing").Optional, "Dict": dict,
-        "Any": object, "DOMAIN": "power_sync",
-        "EV_LIVE_STATUS_COORDINATOR_KEYS": ("sigenergy_coordinator",),
-        "_coordinator_has_normalized_ev_live_data": lambda _coord: True,
-        "coordinator_data_to_ev_live_status": coordinator_data_to_ev_live_status,
-    }
-    unit = ast.Module(body=[StripImports().visit(node)], type_ignores=[])
-    exec(compile(ast.fix_missing_locations(unit), "<ev-live-status>", "exec"), namespace)
-    status = asyncio.run(namespace["_get_tesla_live_status"](
-        hass, SimpleNamespace(entry_id="entry-id")
-    ))
+    status, configured = site_live_status(
+        {"sigenergy_coordinator": coordinator, "inverter_last_state": "normal"},
+        datetime.now(timezone.utc),
+    )
+    assert configured is True
     assert status["is_curtailed"] is True
+
+
+# --- Shared site live-status builder ------------------------------------------
+
+def _site(**overrides):
+    from datetime import datetime, timezone
+
+    coordinator = SimpleNamespace(
+        last_update_success=True,
+        last_update_success_time=datetime.now(timezone.utc),
+        update_interval=None,
+        data={"grid_power": -1.0, "solar_power": 3.0, "battery_power": 0.0, "load_power": 2.0},
+    )
+    for key, value in overrides.items():
+        setattr(coordinator, key, value)
+    return coordinator
+
+
+def test_site_live_status_skips_an_unusable_coordinator_for_a_usable_one():
+    from datetime import datetime, timedelta, timezone
+    from power_sync.automations.live_status import site_live_status
+
+    now = datetime.now(timezone.utc)
+    stale = _site(last_update_success_time=now - timedelta(minutes=10))
+    fresh = _site()
+    fresh.data = {**fresh.data, "grid_power": -2.5}
+    status, configured = site_live_status(
+        {"tesla_coordinator": stale, "sungrow_coordinator": fresh}, now,
+    )
+    assert configured is True
+    assert status["grid_power"] == -2500
+
+
+@pytest.mark.parametrize("problem", [
+    {"last_update_success": False},
+    {"data": {"telemetry_ready": False, "grid_power": 0, "solar_power": 0, "battery_power": 0}},
+    {"data": {"grid_power": None, "solar_power": 0, "battery_power": 0}},
+    {"stale": True},
+])
+def test_site_live_status_fails_closed_when_no_coordinator_is_usable(problem):
+    from datetime import datetime, timedelta, timezone
+    from power_sync.automations.live_status import site_live_status
+
+    now = datetime.now(timezone.utc)
+    if problem.pop("stale", False):
+        problem = {"last_update_success_time": now - timedelta(minutes=10)}
+    assert site_live_status({"tesla_coordinator": _site(**problem)}, now) == (None, True)
+    assert site_live_status({}, now) == (None, False)
+
+
+def test_site_live_status_rejects_fronius_values_retained_past_their_source_time():
+    from datetime import datetime, timedelta, timezone
+    from power_sync.automations.live_status import site_live_status
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=1)
+    fronius = _site()
+    fronius.data = {**fronius.data, "telemetry_ready": True, "telemetry_observed_at": {
+        "load_power": now, "grid_power": old, "battery_power": now,
+    }}
+    assert site_live_status({"fronius_reserva_coordinator": fronius}, now) == (None, True)
+    fronius.data["telemetry_observed_at"]["grid_power"] = now
+    assert site_live_status({"fronius_reserva_coordinator": fronius}, now)[0] is not None
+
+
+def test_status_views_read_the_site_through_the_shared_builder():
+    """The status and price views must not pick coordinators or skip freshness themselves."""
+    source = (ROOT / "__init__.py").read_text()
+    for view, nxt in (("class SolarSurplusStatusView", "\nclass "),
+                      ("class PriceRecommendationView", "\nclass ")):
+        start = source.index(view)
+        body = source[start:source.index(nxt, start + 1)]
+        assert "_surplus_view_site(" in body
+        assert 'entry_data.get("tesla_coordinator")' not in body
+
+
+@pytest.mark.parametrize(("data", "expected"), [
+    ({"battery_level": 55}, 55.0),
+    ({"battery_level": 0}, 0.0),
+    ({}, None),
+    ({"battery_level": None}, None),
+    ({"battery_level": "unavailable"}, None),
+    ({"battery_level": 140}, None),
+])
+def test_home_battery_level_from_a_coordinator_is_never_read_as_zero_when_missing(data, expected):
+    from power_sync.automations.live_status import known_home_battery_soc
+
+    assert known_home_battery_soc(coordinator_data_to_ev_live_status(data)) == expected
+
+
+def test_home_battery_level_from_the_tesla_live_status_api():
+    from power_sync.automations.live_status import known_home_battery_soc
+
+    assert known_home_battery_soc({"battery_soc": 64}) == 64.0
+    assert known_home_battery_soc({"battery_soc": None}) is None

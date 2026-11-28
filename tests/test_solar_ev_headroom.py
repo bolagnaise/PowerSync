@@ -372,3 +372,75 @@ def test_load_probe_is_finite_and_unsafe_load_bypasses_five_minute_delay():
     site.seconds = 10
     assert trial(site.status(battery_power=1000)) == 0
     assert entry["solar_ev_load_probe"]["phase"] == "expired"
+
+
+# --- Teardown during a trial must not leave the lease pending forever ----------
+
+def test_ended_session_abort_result_only_accepts_teardowns_own_record():
+    state = {"active": True}
+    other = {"active": True}
+    lease = {"candidate": ("EV-A", state, ())}
+    assert module.ended_session_abort_result(lease, state) is None       # still its own session
+    assert module.ended_session_abort_result(lease, None) is False       # vanished unexplained
+    assert module.ended_session_abort_result(lease, other) is False      # replaced unexplained
+    assert module.ended_session_abort_result({"candidate": None}, None) is True
+    assert module.ended_session_abort_result({"candidate": None}, other) is None
+    lease["session_ended"] = True
+    assert module.ended_session_abort_result(lease, None) is True
+    assert module.ended_session_abort_result(lease, other) is True       # new owner's session
+
+
+def test_teardown_mid_trial_lets_the_lease_close_and_discovery_resume():
+    site = Site()
+    sessions = {"EV-A": site.state}
+
+    async def abort(lease):
+        site.calls.append("abort")
+        ended = module.ended_session_abort_result(lease, sessions.get("EV-A"))
+        return True if ended is None else ended
+
+    site.runtime.abort = abort
+
+    async def scenario():
+        assert await site.runtime.request(site.candidate, site.status(), sustained_seconds=300)
+        await site.runtime.command_started(site.candidate)
+        # EV teardown (car away, unplug, mode off, handoff) removes the session
+        # first and closes the lease afterwards.
+        site.runtime.session_ended("EV-A", site.state)
+        del sessions["EV-A"]
+        await site.runtime.close()
+
+    asyncio.run(scenario())
+    assert site.runtime.lease is None
+    assert site.saved["pending"] is False and site.saved["ev_abort_pending"] is False
+
+
+def test_unexplained_session_loss_still_keeps_the_trial_pending():
+    site = Site()
+    sessions = {"EV-A": site.state}
+
+    async def abort(lease):
+        ended = module.ended_session_abort_result(lease, sessions.get("EV-A"))
+        return True if ended is None else ended
+
+    site.runtime.abort = abort
+
+    async def scenario():
+        assert await site.runtime.request(site.candidate, site.status(), sustained_seconds=300)
+        await site.runtime.command_started(site.candidate)
+        del sessions["EV-A"]  # no teardown record
+        await site.runtime.close()
+
+    asyncio.run(scenario())
+    assert site.runtime.lease is not None
+    assert site.saved["ev_abort_pending"] is True
+
+
+def test_dynamic_stop_records_the_ended_session_before_removing_it():
+    source = (Path(__file__).parents[1] / "custom_components/power_sync/automations/actions.py").read_text()
+    body = source[source.index("async def _action_stop_ev_charging_dynamic("):]
+    marked = body.index("headroom_runtime.session_ended(vid, state)")
+    assert marked < body.index("del vehicles[vid]")
+    init = (Path(__file__).parents[1] / "custom_components/power_sync/__init__.py").read_text()
+    abort = init[init.index("async def _abort_headroom_trial(lease):"):]
+    assert "ended_session_abort_result(lease, state)" in abort[:abort.index("\n\n")]

@@ -164,6 +164,11 @@ AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
 SMART_SCHEDULE_CLAIM_MAX_AGE_SECONDS = 120.0
 # An unconfirmed Scheduled Stop blocks restarts at most this long without a draw.
 SCHEDULED_PENDING_STOP_MAX_SECONDS = 15 * 60
+# Price-Level waits this long for a Zaptec poll to show its Stop took effect.
+# Afterwards it re-evaluates instead of waiting for ever: a charger still
+# charging is stopped again (or kept, if the price now allows it), and missing
+# telemetry becomes an ordinary wait that clears when telemetry returns.
+ZAPTEC_STOP_READBACK_MAX_SECONDS = 15 * 60
 # Same INFO-pinned logger as ev_ownership.EV_DECISION_LOGGER.
 _EV_DECISION_LOGGER = logging.getLogger(
     "custom_components.power_sync.automations.ev_decisions"
@@ -2260,18 +2265,25 @@ class SurplusForecaster:
     async def forecast_surplus(
         self,
         hours: int = 24,
-        battery_reserve_kw: float = 1.0,
     ) -> List[SurplusForecast]:
         """
         Forecast available solar surplus for each hour.
 
+        Withholds the same household buffer and parallel-charge battery reserve
+        as live Solar Surplus control, from the stored Solar Surplus settings.
+
         Args:
             hours: Number of hours to forecast
-            battery_reserve_kw: Power to reserve for battery charging
 
         Returns:
             List of SurplusForecast objects
         """
+        from ..solar_surplus_config import forecast_ev_surplus_kw
+
+        entry_id = getattr(self.config_entry, "entry_id", None)
+        surplus_config = get_stored_solar_surplus_config(
+            self.hass.data.get(DOMAIN, {}).get(entry_id, {}) if entry_id else None
+        )
         # Update load profiles if needed
         await self.load_estimator.update_from_history()
 
@@ -2292,8 +2304,7 @@ class SurplusForecaster:
             # Get load estimate
             load_kw, load_confidence = self.load_estimator.estimate_load_at_hour(hour_dt)
 
-            # Calculate surplus (available for EV after battery reserve)
-            surplus_kw = max(0, pv_kw - load_kw - battery_reserve_kw)
+            surplus_kw = forecast_ev_surplus_kw(pv_kw, load_kw, surplus_config)
 
             # Combined confidence
             confidence = (solar_confidence + load_confidence) / 2
@@ -7059,6 +7070,11 @@ class AutoScheduleExecutor:
                 return
             # Above every home-battery floor, so those rules stay out of the way.
             battery_soc = 100.0
+        from ..home_battery_floor import home_battery_floor_reached, home_battery_start_allowed
+
+        # Past the block above the level is known (or held at 100% while a
+        # running charge carries on), so the shared floor rule can use it.
+        known_battery_soc = battery_soc
         solar_power_kw = solar_power / 1000
         load_power_kw = load_power / 1000
 
@@ -7096,7 +7112,8 @@ class AutoScheduleExecutor:
         # battery is above the consume level. When battery hits the floor:
         # - stop_at_battery_floor=True: block charging entirely
         # - stop_at_battery_floor=False: allow grid charging (planner proceeds normally)
-        if effective_consume_level > 0 and battery_soc <= effective_consume_level:
+        # Only a real reading at or below the floor stops a session.
+        if home_battery_floor_reached(known_battery_soc, effective_consume_level, True):
             if effective_stop_at_floor:
                 reason = (
                     f"Battery {battery_soc:.0f}% at consume floor "
@@ -7249,6 +7266,14 @@ class AutoScheduleExecutor:
                 should_charge = False
                 reason = "In demand peak period - grid charging blocked (toggle 'Allow grid charging during demand windows' to override)"
 
+        # Min battery to start, as the optimizer plans it: no new grid or battery
+        # start below it. Solar applies it below, with its parallel exception.
+        if should_charge and source != "solar_surplus" and not state.is_charging:
+            allowed, floor_reason = home_battery_start_allowed(known_battery_soc, effective_home_min)
+            if not allowed:
+                should_charge = False
+                reason = floor_reason
+
         # For opportunistic grid charging, defer to price-level policy if configured.
         # The plan's cheapest window (e.g. 30c) can make even 12c look "opportunistic",
         # but the user may have a tighter threshold (e.g. 5c) in price-level settings.
@@ -7303,7 +7328,12 @@ class AutoScheduleExecutor:
             max_battery_charge_kw = solar_config.get("max_battery_charge_rate_kw", 5.0)
 
             # Check if battery needs priority (battery below threshold)
-            if battery_soc < min_battery_for_ev:
+            # An unknown level never stops a running solar session.
+            if (
+                known_battery_soc < min_battery_for_ev
+                if known_battery_soc is not None
+                else not state.is_charging and min_battery_for_ev > 0
+            ):
                 # Check if strict solar surplus is available after reserving the
                 # configured battery charge rate.
                 parallel_available = allow_parallel and current_surplus_kw > max_battery_charge_kw
@@ -11863,7 +11893,12 @@ class PriceLevelChargingExecutor:
         )
         return True
 
-    async def get_charging_decision(self, current_price_cents: Optional[float]) -> Tuple[bool, str, str]:
+    async def get_charging_decision(
+        self,
+        current_price_cents: Optional[float],
+        *,
+        is_charging: Optional[bool] = None,
+    ) -> Tuple[bool, str, str]:
         """
         Get charging decision without taking action.
 
@@ -11916,9 +11951,19 @@ class PriceLevelChargingExecutor:
         # Check minimum home battery SOC
         min_home_battery = settings.get("home_battery_minimum", 20)
         if min_home_battery > 0:
+            from ..home_battery_floor import home_battery_start_allowed
+
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
                 reason = f"Home battery {home_battery_soc:.0f}% < {min_home_battery}% minimum"
+                self._state.last_decision = "waiting"
+                self._state.last_decision_reason = reason
+                return False, reason, ""
+            # An unknown level blocks a new start but never stops a running
+            # charge. Standalone loadpoints pass their own charging state.
+            running = self._state.is_charging if is_charging is None else is_charging
+            allowed, reason = home_battery_start_allowed(home_battery_soc, min_home_battery)
+            if not allowed and not running:
                 self._state.last_decision = "waiting"
                 self._state.last_decision_reason = reason
                 return False, reason, ""
@@ -12018,9 +12063,17 @@ class PriceLevelChargingExecutor:
         # Check minimum home battery SOC
         min_home_battery = settings.get("home_battery_minimum", 20)
         if min_home_battery > 0:
+            from ..home_battery_floor import home_battery_start_allowed
+
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
                 reason = f"Home battery {home_battery_soc:.0f}% < {min_home_battery}% minimum"
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                return False, reason, ""
+            # An unknown level blocks a new start but never stops a running charge.
+            allowed, reason = home_battery_start_allowed(home_battery_soc, min_home_battery)
+            if not allowed and not vehicle_state.is_charging:
                 vehicle_state.last_decision = "waiting"
                 vehicle_state.last_decision_reason = reason
                 return False, reason, ""
@@ -12050,9 +12103,11 @@ class PriceLevelChargingExecutor:
         current_price_cents: Optional[float],
     ) -> Tuple[bool, str, str]:
         """Reconcile tracked and plug-in starts against the same Price-Level policy."""
-        decision = await self.get_charging_decision(current_price_cents)
-        should_charge, reason, mode = decision
         state = self._get_or_create_vehicle_state(loadpoint_id)
+        decision = await self.get_charging_decision(
+            current_price_cents, is_charging=bool(state.is_charging)
+        )
+        should_charge, reason, mode = decision
         # Phase 2: this loadpoint's own state tracks its charging, so the
         # missing-price grace is applied here rather than on self._state.
         if state.is_charging and not should_charge and reason == "No price data available":
@@ -12255,7 +12310,8 @@ class PriceLevelChargingExecutor:
             stop_readback = self._zaptec_cached_readback_after(
                 vehicle_state.stop_requested_at
             )
-            if stop_readback is not False:
+            waited = time.monotonic() - vehicle_state.stop_requested_at
+            if stop_readback is not False and waited < ZAPTEC_STOP_READBACK_MAX_SECONDS:
                 vehicle_state.is_charging = True
                 vehicle_state.last_decision = "stopping"
                 vehicle_state.last_decision_reason = (
@@ -12263,13 +12319,24 @@ class PriceLevelChargingExecutor:
                 )
                 await self.apply_preserve_home_battery(True, reason)
                 return decision
-            vehicle_state.stop_pending = False
-            vehicle_state.stop_requested_at = 0.0
-            vehicle_state.is_charging = False
-            vehicle_state.charging_mode = ""
-            vehicle_state.zaptec_owned = False
-            vehicle_state.last_decision = "stopped"
-            vehicle_state.last_decision_reason = reason
+            if stop_readback is not False:
+                _LOGGER.warning(
+                    "Price-level charging: Zaptec %s did not report stopped %.0f s "
+                    "after Stop (%s); re-evaluating",
+                    pseudo_vin, waited,
+                    "still charging" if stop_readback else "no fresh telemetry",
+                )
+                vehicle_state.stop_pending = False
+                vehicle_state.stop_requested_at = 0.0
+                vehicle_state.is_charging = stop_readback is True
+            else:
+                vehicle_state.stop_pending = False
+                vehicle_state.stop_requested_at = 0.0
+                vehicle_state.is_charging = False
+                vehicle_state.charging_mode = ""
+                vehicle_state.zaptec_owned = False
+                vehicle_state.last_decision = "stopped"
+                vehicle_state.last_decision_reason = reason
 
         # Several logical VINs may resolve to the same physical charger. A
         # manual/Boost/external owner on any alias must also protect that charger.
@@ -12471,9 +12538,13 @@ class PriceLevelChargingExecutor:
             from ..const import CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME
             opts = {**self.config_entry.data, **self.config_entry.options}
             if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
-                decision = await self.get_charging_decision(current_price_cents)
                 tracked = self._tracked_zaptec_vehicle_ids()
                 target = tracked[0] if tracked else "zaptec_standalone"
+                target_state = self._vehicle_states.get(target)
+                decision = await self.get_charging_decision(
+                    current_price_cents,
+                    is_charging=bool(getattr(target_state, "is_charging", False)),
+                )
                 if len(tracked) > 1:
                     decision = (False, "Multiple unresolved Zaptec command profiles; cancelling before restart", "")
                 results[target] = await self._evaluate_zaptec_loadpoint(target, decision)
@@ -12559,7 +12630,11 @@ class PriceLevelChargingExecutor:
             # Discovery may temporarily lose the VIN or expose a different
             # alias. Keep the original command namespace for cancellation and
             # post-command readback; never create an independent new session.
-            decision = await self.get_charging_decision(current_price_cents)
+            selected_state = self._vehicle_states.get(selected_zaptec_vin)
+            decision = await self.get_charging_decision(
+                current_price_cents,
+                is_charging=bool(getattr(selected_state, "is_charging", False)),
+            )
             results[selected_zaptec_vin] = await self._evaluate_zaptec_loadpoint(selected_zaptec_vin, decision)
             zaptec_vins.append(selected_zaptec_vin)
         elif selected_zaptec_vin is None and len(zaptec_vins) > 1:

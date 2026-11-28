@@ -79,6 +79,23 @@ recover_ev_headroom:
       selector:
         text:
 
+reset_ev_recovery_store:
+  name: Reset Tesla EV recovery store
+  description: Start a fresh Tesla command-recovery journal when the stored one is missing or unreadable. Only runs while that hold is active, and only after you confirm every Tesla on this PowerSync entry is stopped or in a known state, because the lost journal can no longer show which commands were uncertain. An unreadable journal is kept as a backup first. Does not send any vehicle command.
+  fields:
+    confirm_vehicles_checked:
+      name: I have checked every Tesla
+      description: Confirm each Tesla on this entry is stopped or in a state you have checked. Required.
+      required: true
+      selector:
+        boolean:
+    entry_id:
+      name: Entry ID
+      description: Optional PowerSync configuration entry ID.
+      required: false
+      selector:
+        text:
+
 get_ev_recovery_status:
   name: Inspect Tesla EV recovery status
   description: Inspect retained command attempts for one exact vehicle. Uses existing HA data without refreshing or waking the car, sending controls, or clearing recovery holds.
